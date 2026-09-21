@@ -280,18 +280,22 @@ def selftest():
     tmp = tempfile.mkdtemp(prefix="distcheck_")
     sample = os.path.join(tmp, "x.txt")
 
-    # 假档案：用于验证「值等同」的拦截能力
-    fake_profile = {"姓名": "真名测试", "手机号": "13912345678"}
-
+    # 假数据一律取仓库自带的示例档案 —— 自测绝不自己编号码。
+    # （教训：自测里编一个手机号，扫描器会掉过头来举报自己）
+    fake_profile = core.load_profile(
+        os.path.join(core.PROJECT_ROOT, "fixtures", "档案_示例.json"))
     values = profile_values(fake_profile)
-    assert "真名测试" in values and "13912345678" in values, "值摊平失败"
-    print("【自测 1】档案值摊平：%d 个 ✓" % len(values))
+    assert values, "未能从示例档案摊平出任何值"
+
+    probe = "13800000000"          # 示例档案里的手机号，在官方假值白名单内
+    assert probe in values, "示例档案里找不到用于验证的手机号"
+    print("【自测 1】示例档案值摊平：%d 个 ✓" % len(values))
 
     # 判据 2：真值出现在文本里 → 必须被检出
     with open(sample, "w", encoding="utf-8") as f:
-        f.write("这是文档\n联系人：真名测试\n")
+        f.write("这是文档\n联系人：%s\n" % probe)
     hit = [v for v in values if v in open(sample, encoding="utf-8").read()]
-    assert "真名测试" in hit, "判据 2 未能检出真值"
+    assert probe in hit, "判据 2 未能检出真值"
     print("【自测 2】值等同检出 ✓")
 
     # 判据 3：校验位 —— 合法号由算法**现场构造**，绝不手写。
