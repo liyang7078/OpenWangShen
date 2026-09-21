@@ -1,0 +1,41 @@
+# ---- 个人档案：绝不提交 ----
+profile.json
+*profile*.json
+!fixtures/档案_示例.json
+!assets/*.json
+
+# ---- 生成的产物（含个人信息）----
+填写清单*.md
+!examples/填写清单_示例.md
+填表报告*.json
+!examples/填表报告_示例.json
+*.png
+!docs/images/*.png
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 测试与缓存 ----
+.pytest_cache/
+.coverage
+htmlcov/

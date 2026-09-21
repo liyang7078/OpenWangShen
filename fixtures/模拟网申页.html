@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>校园招聘网申系统 · 在线申请</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+         background: #eef1f6; color: #1f2937; font-size: 14px; }
+  .topbar { background: #1e3a8a; color: #fff; padding: 14px 28px; font-size: 16px; font-weight: 600;
+            display: flex; justify-content: space-between; align-items: center; }
+  .topbar .sub { font-size: 12px; font-weight: 400; opacity: .85; }
+  .wrap { max-width: 880px; margin: 22px auto 60px; background: #fff; border-radius: 8px;
+          box-shadow: 0 2px 12px rgba(0,0,0,.08); overflow: hidden; }
+  .head { padding: 18px 28px; border-bottom: 1px solid #e5e7eb; }
+  .head h2 { margin: 0 0 6px; font-size: 17px; color: #111827; }
+  .head p { margin: 0; font-size: 12px; color: #6b7280; }
+  .hint { background: #fffbeb; border-left: 4px solid #f59e0b; padding: 10px 14px;
+          margin: 16px 28px; font-size: 12px; color: #92400e; border-radius: 0 4px 4px 0; }
+  form { padding: 6px 28px 28px; }
+  .sec { font-weight: 600; color: #1e3a8a; margin: 22px 0 10px; padding-left: 10px;
+         border-left: 3px solid #1e3a8a; font-size: 14px; }
+  .row { display: flex; align-items: flex-start; padding: 9px 0; border-bottom: 1px dashed #f1f3f7; }
+  .row > label { width: 132px; flex: none; color: #374151; padding-top: 7px; text-align: right; padding-right: 14px; }
+  .row .ctl { flex: 1; }
+  input[type=text], input[type=date], input[type=month], input[type=password], select, textarea {
+      width: 100%; max-width: 420px; padding: 7px 10px; border: 1px solid #d1d5db; border-radius: 4px;
+      font-size: 13px; font-family: inherit; background: #fff; }
+  textarea { max-width: 620px; height: 66px; resize: vertical; }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: #1e3a8a;
+      box-shadow: 0 0 0 2px rgba(30,58,138,.12); }
+  .req { color: #dc2626; margin-left: 2px; }
+  .radio-line { padding-top: 7px; }
+  .radio-line label { margin-right: 20px; font-weight: 400; }
+  .filebox { padding-top: 4px; }
+  .foot { padding: 18px 28px 26px; border-top: 1px solid #e5e7eb; margin-top: 22px;
+          display: flex; gap: 12px; align-items: center; }
+  button { padding: 9px 22px; border: none; border-radius: 4px; font-size: 14px; cursor: pointer;
+           font-family: inherit; }
+  .b-save { background: #e5e7eb; color: #374151; }
+  .b-submit { background: #1e3a8a; color: #fff; font-weight: 600; }
+  .note { font-size: 12px; color: #9ca3af; margin-left: auto; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <span>示例集团 · 校园招聘网申系统</span>
+  <span class="sub">2026 届秋季招聘 · 在线申请</span>
+</div>
+
+<div class="wrap">
+  <div class="head">
+    <h2>财务会计岗（岗位编号 CW-2026-017）</h2>
+    <p>工作地点：北京市 ｜ 招聘人数：6 人 ｜ 报名截止：2026-10-31</p>
+  </div>
+
+  <div class="hint">
+    ⚠️ 本页为 <b>OpenWangShen 测试夹具</b>，用于验证自动填表是否正常工作。<br>
+    所有字段均为演示用途，不连任何真实系统、不收集任何信息。带 <span class="req">*</span> 为必填项。
+  </div>
+
+  <form onsubmit="return false">
+
+    <div class="sec">一、基本信息</div>
+
+    <div class="row">
+      <label for="f_name">姓名<span class="req">*</span></label>
+      <div class="ctl"><input type="text" id="f_name" name="name"></div>
+    </div>
+
+    <div class="row">
+      <label>性别<span class="req">*</span></label>
+      <div class="ctl radio-line">
+        <label><input type="radio" name="gender" id="g_m" value="男"> 男</label>
+        <label><input type="radio" name="gender" id="g_f" value="女"> 女</label>
+      </div>
+    </div>
+
+    <div class="row">
+      <label for="f_birth">出生日期</label>
+      <div class="ctl"><input type="date" id="f_birth" name="birth"></div>
+    </div>
+
+    <div class="row">
+      <label for="f_pol">政治面貌<span class="req">*</span></label>
+      <div class="ctl">
+        <select id="f_pol" name="political">
+          <option value="">请选择</option>
+          <option>中共党员</option>
+          <option>中共预备党员</option>
+          <option>共青团员</option>
+          <option>群众</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="row">
+      <label for="f_id">身份证号<span class="req">*</span></label>
+      <div class="ctl"><input type="text" id="f_id" name="idcard" placeholder="请输入18位身份证号码"></div>
+    </div>
+
+    <div class="row">
+      <label for="f_hukou">户籍所在地</label>
+      <div class="ctl"><input type="text" id="f_hukou" name="hukou"></div>
+    </div>
+
+    <div class="sec">二、联系方式</div>
+
+    <div class="row">
+      <label for="f_phone">手机号码<span class="req">*</span></label>
+      <div class="ctl"><input type="text" id="f_phone" name="mobile"></div>
+    </div>
+
+    <div class="row">
+      <label for="f_mail">电子邮箱<span class="req">*</span></label>
+      <div class="ctl"><input type="text" id="f_mail" name="email"></div>
+    </div>
+
+    <div class="row">
+      <label for="f_addr">通讯地址</label>
+      <div class="ctl"><input type="text" id="f_addr" name="address"></div>
+    </div>
+
+    <div class="sec">三、教育背景</div>
+
+    <div class="row">
+      <label for="f_edu">最高学历<span class="req">*</span></label>
+      <div class="ctl">
+        <select id="f_edu" name="degree">
+          <option value="">请选择</option>
+          <option>大学本科</option>
+          <option>硕士研究生</option>
+          <option>博士研究生</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="row">
+      <label for="f_school">毕业院校<span class="req">*</span></label>
+      <div class="ctl"><input type="text" id="f_school" name="school"></div>
+    </div>
+
+    <div class="row">
+      <label for="f_major">专业<span class="req">*</span></label>
+      <div class="ctl"><input type="text" id="f_major" name="major"></div>
+    </div>
+
+    <div class="row">
+      <label for="f_grad">毕业时间<span class="req">*</span></label>
+      <div class="ctl"><input type="month" id="f_grad" name="graduation"></div>
+    </div>
+
+    <div class="row">
+      <label for="f_en">英语等级</label>
+      <div class="ctl"><input type="text" id="f_en" name="english"></div>
+    </div>
+
+    <div class="sec">四、求职意向</div>
+
+    <div class="row">
+      <label for="f_job">应聘岗位<span class="req">*</span></label>
+      <div class="ctl"><input type="text" id="f_job" name="position"></div>
+    </div>
+
+    <div class="row">
+      <label for="f_city">期望城市</label>
+      <div class="ctl"><input type="text" id="f_city" name="expectcity"></div>
+    </div>
+
+    <div class="row">
+      <label for="f_join">到岗时间</label>
+      <div class="ctl"><input type="date" id="f_join" name="available"></div>
+    </div>
+
+    <div class="row">
+      <label>是否服从调剂</label>
+      <div class="ctl radio-line">
+        <label><input type="radio" name="adjust" id="a_y" value="是"> 是</label>
+        <label><input type="radio" name="adjust" id="a_n" value="否"> 否</label>
+      </div>
+    </div>
+
+    <div class="sec">五、经历与自述</div>
+
+    <div class="row">
+      <label for="f_skill">技能特长</label>
+      <div class="ctl"><textarea id="f_skill" name="skills"></textarea></div>
+    </div>
+
+    <div class="row">
+      <label for="f_eval">自我评价</label>
+      <div class="ctl"><textarea id="f_eval" name="selfeval"></textarea></div>
+    </div>
+
+    <div class="sec">六、附件与验证</div>
+
+    <div class="row">
+      <label for="f_resume">上传简历<span class="req">*</span></label>
+      <div class="ctl filebox"><input type="file" id="f_resume" name="resume"></div>
+    </div>
+
+    <div class="row">
+      <label for="f_trans">成绩单</label>
+      <div class="ctl filebox"><input type="file" id="f_trans" name="transcript"></div>
+    </div>
+
+    <div class="row">
+      <label for="f_code">验证码<span class="req">*</span></label>
+      <div class="ctl"><input type="text" id="f_code" name="captcha" placeholder="请输入验证码"></div>
+    </div>
+
+    <div class="row">
+      <label for="f_pwd">登录密码</label>
+      <div class="ctl"><input type="password" id="f_pwd" name="password"></div>
+    </div>
+
+    <div class="foot">
+      <button type="button" class="b-save">保存草稿</button>
+      <button type="button" class="b-submit">提交投递</button>
+      <span class="note">提交后岗位与志愿顺序不可修改</span>
+    </div>
+
+  </form>
+</div>
+
+</body>
+</html>
