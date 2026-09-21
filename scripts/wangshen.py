@@ -56,22 +56,22 @@ OpenWangShen · 推荐使用顺序
         python scripts/wangshen.py check --profile profile.json
 
 第 2 步  试填（推荐先干跑一次）
-        python scripts/wangshen.py fill --profile profile.json \
+        python scripts/wangshen.py fill --profile profile.json \\
             --url <岗位页地址> --dry-run
         看它能不能识别页面字段。识别不了就换第 3 步。
 
 第 3 步  正式填
-        python scripts/wangshen.py fill --profile profile.json \
+        python scripts/wangshen.py fill --profile profile.json \\
             --url <岗位页地址> --screenshot filled.png
         程序填完会停下。**附件、志愿顺序、提交由你本人完成。**
 
 保底路径（第 2 步跑不通时）
-        python scripts/wangshen.py sheet --profile profile.json \
+        python scripts/wangshen.py sheet --profile profile.json \\
             --labels-file 页面字段.txt --out 填写清单.md
         生成清单，你照着往网页里粘。
 
 需要 AI 帮写开放题时
-        python scripts/wangshen.py mask --profile profile.json \
+        python scripts/wangshen.py mask --profile profile.json \\
             --in 草稿.txt --out 脱敏稿.txt
         把「脱敏稿」发给 AI，回来再 --restore 还原。
 

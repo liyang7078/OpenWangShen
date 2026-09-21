@@ -131,7 +131,10 @@ def read_text(path):
 
 def write_text(path, text):
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    # newline="" 关掉平台换行转换：否则 Windows 上会写成 CRLF，
+    # 与仓库 .gitattributes 的 eol=lf 约定冲突，且让「还原稿 vs 原稿」
+    # 逐行显示为全变（其实是同一内容）。统一出 LF。
+    with open(path, "w", encoding="utf-8", newline="") as f:
         f.write(text)
 
 

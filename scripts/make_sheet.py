@@ -33,6 +33,7 @@ import argparse
 import datetime
 import os
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import core  # noqa: E402
@@ -196,11 +197,15 @@ def main():
         args.labels_file = os.path.join(fx, "页面字段_示例.txt")
         args.company = "示例集团"
         args.job = "财务会计岗"
-        args.out = args.out or os.path.join(core.PROJECT_ROOT, "examples",
-                                            "填写清单_示例.md")
-        # 自测产物落在固定路径，允许刷新，避免堆积一堆时间戳文件
+        # 自测产物写进系统临时目录 —— 绝不落回仓库。
+        # 写回 examples/ 会把已提交的示例文件刷出新时间戳、弄脏工作区。
+        args.out = args.out or os.path.join(tempfile.gettempdir(),
+                                            "OpenWangShen_自测_填写清单.md")
+        # 固定路径 + 允许覆盖，避免临时目录堆一堆时间戳文件
         args.overwrite = True
         print("【自测模式】使用 fixtures/ 下的虚构数据")
+        print("        自测产物：%s" % args.out)
+        print("        （写在系统临时目录，不写入仓库）")
 
     if not args.profile:
         ap.error("必须提供 --profile（或使用 --selftest）")
@@ -256,7 +261,9 @@ def main():
         print("  同名文件已存在，改存为：%s" % out)
 
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
-    with open(out, "w", encoding="utf-8") as f:
+    # newline="" 关掉平台换行转换：Windows 上会写成 CRLF，与仓库
+    # .gitattributes 的 eol=lf 约定冲突。统一出 LF。
+    with open(out, "w", encoding="utf-8", newline="") as f:
         f.write(content)
     print("  已写入：%s" % out)
     return 0

@@ -50,7 +50,7 @@ python scripts/wangshen.py guide            # print the recommended path
 profile.json (local only)
       │
       ├─→ check ─────→ which fields are missing
-      ├─→ mapping ───→ page label → profile key (56 fields / 237 labels)
+      ├─→ mapping ───→ page label → profile key (56 fields / 240 labels)
       ├─→ fill ←──────┘  values go straight into the browser
       │      └─ can't open? → generate checklist → you paste manually
       └─→ mask ──────→ redact PII before sending text to an AI

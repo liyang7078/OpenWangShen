@@ -29,6 +29,7 @@ import datetime
 import json
 import os
 import sys
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import core  # noqa: E402
@@ -302,6 +303,28 @@ def _fill_select(page, item, field):
     return False
 
 
+# 收尾保险丝。个别环境下驱动会卡在 browser.close()／驱动退出上，
+# 那会把「已经填完」的退出码污染成超时码（124），让上层无法判断成败。
+# 正常的关闭是毫秒级，所以这道保险只在收尾真卡住时才生效。
+CLOSE_GUARD_SEC = 15
+
+
+def arm_close_guard(release, seconds=CLOSE_GUARD_SEC, rc=0):
+    """守护线程：收尾若在 seconds 秒内没完成，就以 rc 强制结束进程。
+
+    填写结果在收尾之前就已定妥，因此强制结束不会丢结果。
+    """
+    def _watch():
+        if release.wait(seconds):
+            return
+        print("      ⚠️ 收尾超时（%ds），已结束进程 —— 填写结果不受影响" % seconds)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(rc)
+
+    threading.Thread(target=_watch, daemon=True).start()
+
+
 def run(args):
     try:
         from playwright.sync_api import sync_playwright
@@ -323,6 +346,7 @@ def run(args):
 
     report = {"url": args.url, "时间": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}
 
+    release = None
     with sync_playwright() as pw:
         browser = pw.chromium.launch(**launch_kw)
         ctx = browser.new_context(viewport={"width": 1440, "height": 900})
@@ -372,17 +396,26 @@ def run(args):
         else:
             print("[5/5] 未指定 --screenshot")
 
+        # 报告**先落盘**：收尾保险丝一旦触发会直接结束进程，任何产物都必须
+        # 在武装它之前写完，否则会丢（只含键名与状态，不含真值）。
+        if args.out:
+            os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+            # newline="" 关掉平台换行转换：Windows 上会写成 CRLF，与仓库
+            # .gitattributes 的 eol=lf 约定冲突。统一出 LF。
+            with open(args.out, "w", encoding="utf-8", newline="") as f:
+                json.dump(report, f, ensure_ascii=False, indent=2)
+            print("报告已写入：%s" % args.out)
+
+        # —— 收尾。先上保险丝再关浏览器：退出码只能由填写结果决定。
+        release = threading.Event()
+        arm_close_guard(release, rc=0)
         try:
             browser.close()
         except Exception:
             pass  # 驱动偶发连接错，不影响已完成的填写结果
-
-    # 报告落盘（只含键名与状态，不含真值）
-    if args.out:
-        os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
-        with open(args.out, "w", encoding="utf-8") as f:
-            json.dump(report, f, ensure_ascii=False, indent=2)
-        print("报告已写入：%s" % args.out)
+    # 退出 with 时还会停一次驱动，保险丝仍在守
+    if release is not None:
+        release.set()
 
     print("")
     print("⚠️ 已停在提交前。**附件、志愿顺序、最终提交由你本人完成。**")
