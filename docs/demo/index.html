@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>在线演示 · OpenWangShen 网申自动填写</title>
+<!-- 关键：用空 data URI 占住 favicon，否则浏览器会自动请求 /favicon.ico，
+     在「网络请求计数」上多出一条，破坏本页的自我证明 -->
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #f4f6f8;
+    --panel: #ffffff;
+    --ink: #16191d;
+    --ink-2: #4a5058;
+    --ink-3: #7b838c;
+    --line: #dfe4ea;
+    --line-2: #c9d1da;
+    --accent: #185FA5;
+    --accent-bg: #E6F1FB;
+    --ok: #085041;
+    --ok-bg: #E1F5EE;
+    --warn: #854F0B;
+    --warn-bg: #FAEEDA;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", system-ui, -apple-system, sans-serif;
+    font-size: 16px;
+    line-height: 1.7;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 28px 20px 60px; }
+
+  header.top { margin-bottom: 22px; }
+  h1 { font-size: 26px; font-weight: 600; margin: 0 0 8px; letter-spacing: -0.3px; }
+  .claim {
+    font-size: 17px; color: var(--ink-2); margin: 0;
+    border-left: 4px solid var(--accent); padding-left: 14px;
+  }
+  .claim b { color: var(--ink); font-weight: 600; }
+
+  .grid { display: grid; grid-template-columns: 1.55fr 1fr; gap: 20px; align-items: start; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 14px; padding: 22px;
+  }
+  .panel h2 {
+    font-size: 15px; font-weight: 600; margin: 0 0 4px;
+    text-transform: none; letter-spacing: 0.2px;
+  }
+  .panel .sub { font-size: 13px; color: var(--ink-3); margin: 0 0 18px; }
+
+  .field { margin-bottom: 14px; }
+  .field label { display: block; font-size: 14px; font-weight: 500; margin-bottom: 5px; color: var(--ink-2); }
+  .field input, .field select, .field textarea {
+    width: 100%; padding: 9px 11px; font-size: 15px; font-family: inherit;
+    border: 1px solid var(--line-2); border-radius: 8px;
+    background: #fcfdfe; color: var(--ink); transition: background .18s, border-color .18s;
+  }
+  .field textarea { min-height: 62px; resize: vertical; }
+  .field input:focus, .field select:focus, .field textarea:focus {
+    outline: 2px solid var(--accent); outline-offset: -1px; background: #fff;
+  }
+  .field.filled input, .field.filled select, .field.filled textarea {
+    background: var(--ok-bg); border-color: #9FE1CB;
+  }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .radios { display: flex; gap: 18px; padding-top: 4px; }
+  .radios label { font-weight: 400; display: flex; align-items: center; gap: 6px; margin: 0; }
+  .radios input { width: auto; }
+
+  .gate {
+    border: 1px dashed var(--line-2); border-radius: 8px;
+    padding: 10px 12px; font-size: 13px; color: var(--ink-3); background: #fafbfc;
+  }
+  .gate b { color: var(--warn); font-weight: 600; }
+
+  .actions { display: flex; gap: 10px; margin: 20px 0 4px; flex-wrap: wrap; }
+  button {
+    font-family: inherit; font-size: 15px; font-weight: 500;
+    padding: 11px 22px; border-radius: 9px; cursor: pointer;
+    border: 1px solid var(--accent); background: var(--accent); color: #fff;
+    transition: filter .15s;
+  }
+  button:hover { filter: brightness(1.12); }
+  button.ghost { background: #fff; color: var(--accent); }
+
+  .dash-row {
+    display: flex; justify-content: space-between; align-items: baseline;
+    padding: 13px 0; border-bottom: 1px solid var(--line);
+  }
+  .dash-row:last-child { border-bottom: 0; }
+  .dash-row .k { font-size: 14px; color: var(--ink-2); }
+  .dash-row .v { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .v.zero { color: var(--ok); }
+  .v.nonzero { color: var(--warn); }
+
+  .badge {
+    display: inline-block; font-size: 12px; font-weight: 600;
+    padding: 2px 9px; border-radius: 20px; vertical-align: 3px; margin-left: 7px;
+  }
+  .badge.ok { background: var(--ok-bg); color: var(--ok); }
+  .badge.warn { background: var(--warn-bg); color: var(--warn); }
+
+  .log {
+    margin-top: 14px; font-size: 13px; color: var(--ink-2);
+    background: #fafbfc; border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px 14px; max-height: 190px; overflow-y: auto;
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; line-height: 1.75;
+  }
+  .log .t { color: var(--ink-3); }
+  .log .fill { color: var(--ok); }
+  .log .gate { border: 0; background: none; padding: 0; display: block; color: var(--warn); }
+
+  .verify { margin-top: 22px; }
+  .verify ol { margin: 10px 0 0; padding-left: 22px; }
+  .verify li { margin-bottom: 9px; font-size: 15px; }
+  code {
+    background: #eef2f6; padding: 2px 7px; border-radius: 5px;
+    font-family: ui-monospace, Consolas, monospace; font-size: 14px; color: var(--ink);
+  }
+  .why {
+    margin-top: 16px; padding: 14px 16px; border-radius: 10px;
+    background: var(--accent-bg); border: 1px solid #B5D4F4; font-size: 14px; color: #0C447C;
+  }
+  footer { margin-top: 34px; padding-top: 18px; border-top: 1px solid var(--line); font-size: 13px; color: var(--ink-3); }
+  footer b { color: var(--ink-2); font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <h1>OpenWangShen · 在线演示</h1>
+    <p class="claim">
+      这个页面上发生的一切，都只跑在<b>你的浏览器内存</b>里。
+      点一下右边的「一键填入」——<b>网络请求计数会一直是 0</b>。<br>
+      不信？按 F12 自己看（步骤在最下面）。
+    </p>
+  </header>
+
+  <div class="grid">
+
+    <section class="panel">
+      <h2>模拟网申表单</h2>
+      <p class="sub">字段结构参照真实央国企网申系统。全部为虚构数据，不对应任何真实自然人。</p>
+
+      <div class="row2">
+        <div class="field" id="w-姓名"><label>姓名 *</label><input id="f-姓名" type="text"></div>
+        <div class="field" id="w-性别"><label>性别 *</label>
+          <select id="f-性别"><option value="">请选择</option><option>男</option><option>女</option></select>
+        </div>
+      </div>
+
+      <div class="row2">
+        <div class="field" id="w-出生日期"><label>出生日期 *</label><input id="f-出生日期" type="date"></div>
+        <div class="field" id="w-政治面貌"><label>政治面貌 *</label>
+          <select id="f-政治面貌"><option value="">请选择</option><option>中共党员</option><option>共青团员</option><option>群众</option></select>
+        </div>
+      </div>
+
+      <div class="row2">
+        <div class="field" id="w-身份证号"><label>身份证号 *</label><input id="f-身份证号" type="text"></div>
+        <div class="field" id="w-户籍所在地"><label>户籍所在地</label><input id="f-户籍所在地" type="text"></div>
+      </div>
+
+      <div class="row2">
+        <div class="field" id="w-手机号码"><label>手机号码 *</label><input id="f-手机号码" type="text"></div>
+        <div class="field" id="w-电子邮箱"><label>电子邮箱 *</label><input id="f-电子邮箱" type="text"></div>
+      </div>
+
+      <div class="field" id="w-通讯地址"><label>通讯地址</label><input id="f-通讯地址" type="text"></div>
+
+      <div class="row2">
+        <div class="field" id="w-最高学历"><label>最高学历 *</label>
+          <select id="f-最高学历"><option value="">请选择</option><option>本科</option><option>硕士研究生</option><option>博士研究生</option></select>
+        </div>
+        <div class="field" id="w-毕业院校"><label>毕业院校 *</label><input id="f-毕业院校" type="text"></div>
+      </div>
+
+      <div class="row2">
+        <div class="field" id="w-专业"><label>专业 *</label><input id="f-专业" type="text"></div>
+        <div class="field" id="w-毕业时间"><label>毕业时间 *</label><input id="f-毕业时间" type="month"></div>
+      </div>
+
+      <div class="row2">
+        <div class="field" id="w-英语等级"><label>英语等级</label>
+          <select id="f-英语等级"><option value="">请选择</option><option>CET-4</option><option>CET-6</option><option>专业八级</option></select>
+        </div>
+        <div class="field" id="w-应聘岗位"><label>应聘岗位 *</label><input id="f-应聘岗位" type="text"></div>
+      </div>
+
+      <div class="row2">
+        <div class="field" id="w-期望城市"><label>期望城市</label><input id="f-期望城市" type="text"></div>
+        <div class="field" id="w-到岗时间"><label>到岗时间</label><input id="f-到岗时间" type="date"></div>
+      </div>
+
+      <div class="field" id="w-是否服从调剂"><label>是否服从调剂</label>
+        <div class="radios">
+          <label><input type="radio" name="adjust" value="是"> 是</label>
+          <label><input type="radio" name="adjust" value="否"> 否</label>
+        </div>
+      </div>
+
+      <div class="field" id="w-技能特长"><label>技能特长</label><textarea id="f-技能特长"></textarea></div>
+      <div class="field" id="w-自我评价"><label>自我评价</label><textarea id="f-自我评价"></textarea></div>
+
+      <div class="actions">
+        <button id="btn-fill">一键填入</button>
+        <button id="btn-reset" class="ghost">清空重来</button>
+      </div>
+
+      <div class="gate">
+        <b>人工门（程序不碰）</b>：上传简历 · 成绩单 · 验证码 · 登录密码 —— 这四项永远留给你自己。
+      </div>
+    </section>
+
+    <aside class="panel">
+      <h2>隐私仪表盘</h2>
+      <p class="sub">实时统计，不刷新页面也算得出来。</p>
+
+      <div class="dash-row">
+        <span class="k">页面发起的外部请求</span>
+        <span class="v zero" id="v-net">0</span>
+      </div>
+      <div class="dash-row">
+        <span class="k">已填入字段</span>
+        <span class="v" id="v-filled">0</span>
+      </div>
+      <div class="dash-row">
+        <span class="k">你的数据现在在哪</span>
+        <span class="v" style="font-size:15px;font-weight:500" id="v-where">尚未产生</span>
+      </div>
+      <div class="dash-row">
+        <span class="k">数据离开本机的次数</span>
+        <span class="v zero" id="v-leave">0</span>
+      </div>
+
+      <div class="log" id="log"><span class="t">等待操作…</span></div>
+    </aside>
+  </div>
+
+  <section class="panel verify">
+    <h2>自己验证一遍（约 20 秒）</h2>
+    <ol>
+      <li>按 <code>F12</code> 打开开发者工具，切到 <code>Network</code>（网络）标签</li>
+      <li>点一下 <code>清空</code>（禁止符号），把已有记录清掉</li>
+      <li>回到这里，点 <b>「一键填入」</b></li>
+      <li>看 Network 面板 —— <b>一条新记录都不会出现</b></li>
+    </ol>
+    <div class="why">
+      为什么这一下能证明？因为「把信息发出去」这个动作，在浏览器里**必然**会留下一条网络记录。
+      只要一条都没有，就说明数据没有离开这台机器。<br>
+      <br>
+      这也是 OpenWangShen 与「云端自动填写工具」的根本区别 ——
+      后者要把你的值传给它的服务器才能算出该选哪一项，代价是你的数据必须出本机。
+    </div>
+  </section>
+
+  <footer>
+    <p><b>三条红线（与正式程序一致）</b>：① 绝不点提交 ② 绝不填密码、不碰验证码 ③ 身份信息不出本机</p>
+    <p>本页为纯静态演示，不含任何外部依赖、不加载任何第三方脚本。填入所用数据全部为虚构。</p>
+  </footer>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ── 请求计数：在任何其它代码之前挂钩子 ───────────────────── */
+  var netCount = 0;
+  var netLog = [];
+
+  function bump(what) {
+    netCount++;
+    netLog.push(what);
+    renderNet();
+  }
+
+  var _fetch = window.fetch;
+  if (_fetch) {
+    window.fetch = function () { bump("fetch → " + (arguments[0] || "")); return _fetch.apply(this, arguments); };
+  }
+  var _open = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (m, u) { bump("XHR " + m + " → " + u); return _open.apply(this, arguments); };
+  if (navigator.sendBeacon) {
+    var _beacon = navigator.sendBeacon.bind(navigator);
+    navigator.sendBeacon = function (u) { bump("sendBeacon → " + u); return _beacon.apply(null, arguments); };
+  }
+  if (window.WebSocket) {
+    var _WS = window.WebSocket;
+    window.WebSocket = function (u) { bump("WebSocket → " + u); return new _WS(u); };
+  }
+  // 资源级加载（图片/脚本/字体…）也计入
+  try {
+    new PerformanceObserver(function (list) {
+      list.getEntries().forEach(function (e) {
+        bump(e.initiatorType + " → " + e.name);
+      });
+    }).observe({ entryTypes: ["resource"] });
+  } catch (e) { /* 老浏览器忽略 */ }
+
+  function renderNet() {
+    var el = document.getElementById("v-net");
+    el.textContent = netCount;
+    el.className = "v " + (netCount === 0 ? "zero" : "nonzero");
+  }
+
+  function log(html, cls) {
+    var box = document.getElementById("log");
+    if (box.dataset.init !== "1") { box.innerHTML = ""; box.dataset.init = "1"; }
+    var d = document.createElement("div");
+    if (cls) d.className = cls;
+    d.innerHTML = html;
+    box.appendChild(d);
+    box.scrollTop = box.scrollHeight;
+  }
+
+  /* ── 虚构档案：与仓库 fixtures/档案_示例.json 保持一致 ────── */
+  var PROFILE = {
+    "姓名": "示例考生",
+    "性别": "男",
+    "出生日期": "1999-01-01",
+    "政治面貌": "中共党员",
+    "身份证号": "110101199901011234",
+    "户籍所在地": "山东省济南市历下区",
+    "手机号码": "13800000000",
+    "电子邮箱": "example@example.com",
+    "通讯地址": "北京市海淀区示例路 1 号",
+    "最高学历": "硕士研究生",
+    "毕业院校": "示例大学",
+    "专业": "会计学",
+    "毕业时间": "2026-06",
+    "英语等级": "CET-6",
+    "应聘岗位": "财务会计岗",
+    "期望城市": "北京",
+    "到岗时间": "2026-07-01",
+    "技能特长": "熟练使用 Excel、SAP 财务模块；通过 CPA 会计、税法两科。",
+    "自我评价": "示例文本：做事细致，对数字敏感，具备较强的学习与沟通能力。"
+  };
+
+  /* 选项映射：档案里的值 → 页面下拉的文案。
+     这一段正是「站点适配库」在真实程序里干的事。 */
+  var OPTION_MAP = {
+    "最高学历": {
+      "硕士研究生": "硕士研究生"
+    }
+  };
+
+  function pickOption(sel, want) {
+    var list = OPTION_MAP[sel.id.replace(/^f-/, "")];
+    var target = (list && list[want]) || want;
+    for (var i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].text.trim() === target) { sel.selectedIndex = i; return true; }
+    }
+    for (var j = 0; j < sel.options.length; j++) {
+      if (sel.options[j].text.indexOf(want) >= 0 || want.indexOf(sel.options[j].text) >= 0) {
+        sel.selectedIndex = j; return true;
+      }
+    }
+    return false;
+  }
+
+  var MANUAL_GATES = [
+    { name: "上传简历", why: "附件要选本机文件，程序不碰" },
+    { name: "成绩单", why: "同上" },
+    { name: "验证码", why: "人机验证，必须真人" },
+    { name: "登录密码", why: "凭据绝不读取、绝不代填" }
+  ];
+
+  function fill() {
+    var n = 0, missed = [];
+
+    Object.keys(PROFILE).forEach(function (k) {
+      var el = document.getElementById("f-" + k);
+      if (!el) return;
+      var val = PROFILE[k];
+
+      if (el.tagName === "SELECT") {
+        if (pickOption(el, val)) { mark(k); n++; }
+        else { missed.push(k); }
+      } else {
+        el.value = val;
+        mark(k);
+        n++;
+      }
+    });
+
+    // 单选
+    var radios = document.querySelectorAll('input[name="adjust"]');
+    if (radios.length) {
+      radios[0].checked = true;
+      mark("是否服从调剂");
+      n++;
+    }
+
+    document.getElementById("v-filled").textContent = n;
+    document.getElementById("v-where").textContent = "仅本页内存";
+    document.getElementById("v-leave").textContent = "0";
+
+    log('<span class="t">' + stamp() + '</span> 开始填入，共 ' + n + ' 个字段', "fill");
+    Object.keys(PROFILE).forEach(function (k) {
+      if (document.getElementById("f-" + k)) log('  <span class="fill">✓</span> ' + k);
+    });
+    log('  <span class="fill">✓</span> 是否服从调剂');
+    if (missed.length) log('  <span class="t">未识别：' + missed.join("、") + '（如实列出，不瞎猜）</span>');
+    MANUAL_GATES.forEach(function (g) {
+      log('  <span class="gate">— 跳过「' + g.name + '」：' + g.why + '</span>', "gate");
+    });
+    log('<span class="t">' + stamp() + '</span> 完成。本次外部请求 ' + netCount + ' 条。', "fill");
+    renderNet();
+  }
+
+  function mark(key) {
+    var w = document.getElementById("w-" + key);
+    if (w) w.classList.add("filled");
+  }
+
+  function stamp() {
+    var d = new Date();
+    return "[" + String(d.getHours()).padStart(2, "0") + ":" +
+           String(d.getMinutes()).padStart(2, "0") + ":" +
+           String(d.getSeconds()).padStart(2, "0") + "]";
+  }
+
+  function reset() {
+    Object.keys(PROFILE).forEach(function (k) {
+      var el = document.getElementById("f-" + k);
+      if (el) { el.value = ""; }
+      var w = document.getElementById("w-" + k);
+      if (w) w.classList.remove("filled");
+    });
+    document.querySelectorAll('input[name="adjust"]').forEach(function (r) { r.checked = false; });
+    var w2 = document.getElementById("w-是否服从调剂");
+    if (w2) w2.classList.remove("filled");
+    document.getElementById("v-filled").textContent = "0";
+    document.getElementById("v-where").textContent = "尚未产生";
+    document.getElementById("v-leave").textContent = "0";
+    var box = document.getElementById("log");
+    box.innerHTML = '<span class="t">已清空，等待操作…</span>';
+    box.dataset.init = "0";
+  }
+
+  document.getElementById("btn-fill").addEventListener("click", fill);
+  document.getElementById("btn-reset").addEventListener("click", reset);
+
+  renderNet();
+})();
+</script>
+</body>
+</html>

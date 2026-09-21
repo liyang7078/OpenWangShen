@@ -7,6 +7,11 @@
 
 ---
 
+**先看效果** → [在线演示](https://liyang7078.github.io/OpenWangShen/demo/)：点一下就填完，全程零网络请求，你可以按 F12 自己验证。
+**直接使用** → [下载最新版](https://github.com/liyang7078/OpenWangShen/releases/latest)，或直接 clone 本仓库（体检 / 清单 / 脱敏三个功能**只用 Python 标准库**，零依赖）。
+
+---
+
 ## 这是什么
 
 一个**跑在你自己电脑上**的网申表单填写工具。它做四件事：
@@ -124,13 +129,15 @@ OpenWangShen/
 │   ├── fill_form.py       自动填表（playwright）
 │   ├── make_sheet.py      填写清单生成（保底模式）
 │   ├── mask_pii.py        PII 脱敏通道
+│   ├── dist_check.py      分发前真实值扫描（发布自检）
 │   └── wangshen.py        统一入口
 ├── assets/
 │   └── 字段规则_通用.json   字段知识库（56 字段 / 240 标签）
+├── sites/                 站点适配库（按站点：字段选择器 + 选项映射）
 ├── fixtures/              测试夹具（示例档案 / 模拟网申页）
 ├── examples/              示例产物
 ├── tests/                 单元测试
-└── docs/                  详细文档
+└── docs/                  详细文档（demo/ 为在线演示）
 ```
 
 ---
