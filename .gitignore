@@ -39,3 +39,9 @@ desktop.ini
 .pytest_cache/
 .coverage
 htmlcov/
+
+# ---- 手工备份：绝不提交 ----
+# 备份命名 .bakYYYYMMDD-<原因>，与正式文件只差一个后缀。若被 `git add -A` 卷进来，
+# 会把「旧内容的副本」连同作者侧痕迹一起带进公开仓库。
+# 必须放在文件末尾：gitignore 以**最后匹配**的规则为准，否则会被上方 `!assets/*.json` 重新放行。
+*.bak*
