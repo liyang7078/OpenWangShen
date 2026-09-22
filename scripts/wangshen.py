@@ -3,12 +3,14 @@
 """
 wangshen.py · OpenWangShen 统一入口
 ====================================
-把四个子工具收进一条命令，避免记一堆脚本名。
+把六个子工具收进一条命令，避免记一堆脚本名。
 
     python scripts/wangshen.py check   --profile profile.json      档案体检
     python scripts/wangshen.py sheet   --profile profile.json ...  生成填写清单
     python scripts/wangshen.py fill    --profile profile.json ...  自动填表（不提交）
     python scripts/wangshen.py mask    --profile profile.json ...  PII 脱敏
+    python scripts/wangshen.py issue   --list                      问题库：登记 / 查询 / 策略匹配
+    python scripts/wangshen.py trial   --issue <id> --path ...     试跑多路径 → 择优 → 固化
     python scripts/wangshen.py selftest                            全部自测
     python scripts/wangshen.py guide                               打印使用路径
 
@@ -30,6 +32,8 @@ CMDS = {
     "sheet": ("make_sheet.py", "生成填写清单（保底模式，零浏览器依赖）"),
     "fill": ("fill_form.py", "自动填表：打开岗位页→识别字段→写入（不提交）"),
     "mask": ("mask_pii.py", "PII 脱敏：需要 AI 帮忙写开放题时先脱敏"),
+    "issue": ("issue_registry.py", "问题库：登记踩过的坑 / 查解法 / 按指纹匹配策略"),
+    "trial": ("issue_trial.py", "问题试验：多路径试跑 → 断言择优 → 固化进策略库"),
 }
 
 
@@ -94,6 +98,9 @@ def selftest():
         ("check_profile.py", ["check_profile.py", "--selftest"]),
         ("make_sheet.py", ["make_sheet.py", "--selftest"]),
         ("mask_pii.py", ["mask_pii.py", "--selftest"]),
+        ("dist_check.py", ["dist_check.py", "--selftest"]),
+        ("issue_registry.py", ["issue_registry.py", "--selftest"]),
+        ("issue_trial.py", ["issue_trial.py", "--selftest"]),
     ]:
         print("\n--- %s ---" % name)
         rc = subprocess.call([PY, os.path.join(HERE, args[0])] + args[1:])
