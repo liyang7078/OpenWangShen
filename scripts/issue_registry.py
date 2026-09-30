@@ -264,12 +264,12 @@ def render_report(items, path=ISSUES):
 
 
 # ---------------------------------------------------------------- CLI 动作
-def do_add(items, obj, path=ISSUES):
+def do_add(items, obj, path=ISSUES, today=None):
     obj = dict(obj)
     obj.setdefault("首次发现", datetime.datetime.now().strftime("%Y-%m-%d"))
     obj.setdefault("状态", "待试验")
     obj.setdefault("路径", [])
-    obj["id"] = obj.get("id") or next_id(items)
+    obj["id"] = obj.get("id") or next_id(items, today=today)
     if find(items, obj["id"]):
         return 2, "[ERR] id 已存在：%s" % obj["id"]
     items.append(obj)
@@ -343,12 +343,14 @@ def _selftest():
         n0 = next_id(items, today="20260922")
         check("⑧ id 从 001 起（Q-YYYYMMDD-NNN）", n0 == "Q-20260922-001", n0)
         rc, qid = do_add(items, {"现象": "虚构：portal 后取不到标签",
-                                 "站点": ["北森"], "指纹": ["portal-to-body"]}, ipath)
+                                 "站点": ["北森"], "指纹": ["portal-to-body"]}, ipath,
+                         today="20260922")   # 与 ⑫ 同日，序号才连贯
         check("⑨ 登记成功并落盘", rc == 0 and os.path.isfile(ipath), "rc=%s" % rc)
         items2, broken = load_issues(ipath)
         check("⑩ 回读一致且无坏行", len(items2) == 1 and broken == 0)
         check("⑪ 默认状态=待试验", items2[0]["状态"] == "待试验")
-        rc, qid2 = do_add(items, {"现象": "虚构：另一个问题"}, ipath)
+        rc, qid2 = do_add(items, {"现象": "虚构：另一个问题"}, ipath,
+                          today="20260922")   # 必须注入：否则按真实当天算，断言隔天即失效
         check("⑫ 当日序号递增到 002", qid2 == "Q-20260922-002", qid2)
 
         # ---- 状态机 ----
