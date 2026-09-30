@@ -74,16 +74,19 @@ pip install playwright
 playwright install chromium
 ```
 
-### 三步走
+### 四步走
 
 ```bash
-# 1. 准备档案：复制示例，改成你自己的信息
+# 1. 还没有档案？先要一份空白问卷 —— 它列出网申会问的全部字段，你逐项填
+python scripts/make_checklist.py --out 网申信息清单.md
+
+# 2. 准备档案：照问卷把信息整理成 profile.json（也可以复制示例再改）
 cp fixtures/档案_示例.json profile.json
 
-# 2. 体检
+# 3. 体检
 python scripts/wangshen.py check --profile profile.json
 
-# 3. 填表（建议先 --dry-run 看能不能识别字段）
+# 4. 填表（建议先 --dry-run 看能不能识别字段）
 python scripts/wangshen.py fill --profile profile.json \
     --url "https://某公司招聘页" --dry-run
 python scripts/wangshen.py fill --profile profile.json \
@@ -101,11 +104,11 @@ python scripts/wangshen.py guide
 ## 工作原理
 
 ```
-profile.json（你的档案，只在本机）
+（还没有档案？）→ 生成《网申信息清单》空白问卷 → 逐项填 → profile.json（你的档案，只在本机）
         │
         ├─→ 体检 ──────────→ 缺什么字段
         │
-        ├─→ 字段映射 ──────→ 页面标签 → 档案键（本地规则库，56 字段 / 240 标签）
+        ├─→ 字段映射 ──────→ 页面标签 → 档案键（本地规则库，165 字段 / 643 标签）
         │                       │
         ├─→ 自动填表 ←─────────┘  真值直接写进浏览器
         │      └─ 打不开？→ 生成《填写清单》→ 你照着粘
@@ -129,6 +132,7 @@ OpenWangShen/
 │   ├── core.py            核心库：规则加载 / 标签索引 / 字段映射
 │   ├── check_profile.py   档案体检
 │   ├── fill_form.py       自动填表（playwright）
+│   ├── make_checklist.py  网申信息清单生成（投递前的空白问卷）
 │   ├── make_sheet.py      填写清单生成（保底模式）
 │   ├── mask_pii.py        PII 脱敏通道
 │   ├── dist_check.py      分发前真实值扫描（发布自检）
@@ -136,7 +140,8 @@ OpenWangShen/
 │   ├── issue_trial.py     问题试验：多路径试跑 → 断言择优 → 固化
 │   └── wangshen.py        统一入口
 ├── assets/
-│   ├── 字段规则_通用.json   字段知识库（56 字段 / 240 标签）
+│   ├── 字段规则_通用.json   字段知识库（165 字段 / 643 标签）
+│   ├── 记录组_通用.json     记录组口径（11 组 / 65 项，可多条的表格结构）
 │   ├── 问题库.jsonl        踩过的坑（公开子集：16 条，含失败的尝试）
 │   └── 站点策略.json        指纹 → 胜出解法（8 条策略 / 11 个控件指纹）
 ├── sites/                 站点适配库（按站点：字段选择器 + 选项映射）
