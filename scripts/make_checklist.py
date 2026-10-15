@@ -34,6 +34,9 @@ import re
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import core  # noqa: E402
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 ASSETS = os.path.join(ROOT, "assets")
@@ -292,6 +295,17 @@ def _selftest():
         f.write(md)
     check("⑮ 产物可落盘且非空", os.path.getsize(p) > 500, os.path.getsize(p))
 
+    # 统一 safe_write 的接线实测：默认不覆盖同名产物（换名另存）
+    q = os.path.join(tmp, "safe_write探针.md")
+    q1 = core.safe_write(q, "第一版")
+    q2 = core.safe_write(q, "第二版")
+    check("⑯ 默认不覆盖同名产物（统一走 core.safe_write）",
+          q1 == os.path.abspath(q) and q2 != q1
+          and open(q1, encoding="utf-8").read() == "第一版",
+          (q1, q2))
+    import shutil
+    shutil.rmtree(tmp, ignore_errors=True)
+
     print("")
     print("自测结果：%d 通过 / %d 失败" % (ok[0], bad[0]))
     return 0 if bad[0] == 0 else 1
@@ -322,18 +336,14 @@ def main(argv=None):
         groups = []
 
     out = args.out
-    if os.path.exists(out) and not args.overwrite:
-        base, ext = os.path.splitext(out)
-        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        out = "%s_%s%s" % (base, stamp, ext)
-        print("[WARN] 同名文件已存在，改存为：%s" % out)
-
     md = render(fields, domains, groups)
-    with open(out, "w", encoding="utf-8", newline="") as f:
-        f.write(md)
+    # 统一 safe_write（2026-10-16）：默认不覆盖同名（换名另存），原子替换。
+    wrote = core.safe_write(out, md, overwrite=args.overwrite)
+    if os.path.abspath(wrote) != os.path.abspath(out):
+        print("[WARN] 同名文件已存在，改存为：%s" % wrote)
 
     b = bucket(fields)
-    print("[OK] 已生成 %s" % out)
+    print("[OK] 已生成 %s" % wrote)
     print("     值字段 %d（必填 %d / 常用 %d / 其余选填 %d）｜ 附件 %d ｜ 记录组 %d 组"
           % (len(b[BAND_REQUIRED]) + len(b[BAND_COMMON]) + len(b[BAND_REST]),
              len(b[BAND_REQUIRED]), len(b[BAND_COMMON]), len(b[BAND_REST]),

@@ -120,6 +120,8 @@ python scripts/wangshen.py sheethtml --in 填写清单.md
 
 # 5. 遇到填不上的框？顺手记一条，下一个人就不必再踩
 python scripts/wangshen.py report
+#    答几个问题就行，格式不用你想。没有 GitHub 账号也没关系 ——
+#    它默认就带一条「一键邮件」的通道。
 ```
 
 不确定怎么走？打印使用路径：
@@ -127,6 +129,22 @@ python scripts/wangshen.py report
 ```bash
 python scripts/wangshen.py guide
 ```
+
+---
+
+## 术语对照
+
+这个 README 里几个词，在这里一次说清：
+
+| 词 | 指什么 |
+|---|---|
+| **档案** | 你自己的那份 `profile.json`，存着姓名/手机号/学历这些真实信息。**只在你本机** |
+| **字段标签** | 网页上输入框旁边写的字，比如「联系人手机\*」。程序靠它判断「这是哪一项」。带 `*` 表示必填 |
+| **指纹** | 一类**页面特征**的代号，比如「上传框被隐藏了」「下拉是自绘的」。它**不认站点**：形态一样就复用同一条经验 |
+| **试用 / 固化** | 同一个坑想出几种修法，逐个真跑一遍比成绩，赢的那条才写进策略库长期生效。**没试赢过的不许固化** |
+| **零真值 / 反证** | 程序对"即将写出去的内容"再扫一遍，确认没有任何能定位到真人的信息。命中即**中止** |
+| **停手** | 到预算、识别率过低、扫不到字段时主动放弃并说明原因，**绝不假装成功**（退出码 5） |
+| **三条线** | ① 绝不代替你点提交 ② 绝不填密码、绝不碰验证码 ③ 你的身份信息不出本机 |
 
 ---
 
@@ -139,7 +157,7 @@ python scripts/wangshen.py guide
         │
         ├─→ 体检 ──────────→ 缺什么字段
         │
-        ├─→ 字段映射 ──────→ 页面标签 → 档案键（本地规则库，165 字段 / 643 标签）
+        ├─→ 字段映射 ──────→ 页面标签 → 档案键（本地规则库，187 字段 / 731 标签）
         │                       │
         ├─→ 自动填表 ←─────────┘  真值直接写进浏览器（单站 300 秒预算）
         │      ├─ 打不开？→ 生成《填写清单》
@@ -177,20 +195,28 @@ OpenWangShen/
 │   ├── mask_pii.py         PII 脱敏通道
 │   ├── report_feedback.py  反馈包（考生侧）：填不上的框 → 可提交的 Issue
 │   ├── inbox.py            回流收件台（作者侧）：汇总反馈 → 逐条决定收不收
+│   ├── gen_issue_template.py  Issue 模板生成器（选项集单一来源，--check 防漂移）
 │   ├── dist_check.py       分发前真实值扫描（发布自检）
 │   ├── issue_registry.py   问题库：登记 / 状态机 / 按指纹匹配策略
 │   ├── issue_trial.py      问题试验：多路径试跑 → 断言择优 → 固化
+│   ├── htmlprobe.py        迷你 HTML 探针（自测与单测共用，断言结构而非文案）
 │   └── wangshen.py         统一入口
 ├── assets/
-│   ├── 字段规则_通用.json   字段知识库（187 字段 / 731 标签 / 14 组值域别名）
+│   ├── 字段规则_通用.json   字段知识库（187 字段 / 731 标签 / 15 组值域别名）
 │   ├── 记录组_通用.json     记录组口径（11 组 / 65 项，可多条的表格结构）
 │   ├── 问题库.jsonl        踩过的坑（公开子集：16 条，含失败的尝试）
-│   ├── 站点策略.json        指纹 → 胜出解法（8 条策略 / 11 个控件指纹）
+│   ├── 站点策略.json        指纹 → 胜出解法（8 条策略 / 9 个控件指纹）
 │   └── 反馈渠道.json        反馈回传配置（填了反馈邮箱就多一条零账号通道）
 ├── sites/                 站点适配库（按站点：字段选择器 + 选项映射）
 ├── fixtures/              测试夹具（示例档案 / 模拟网申页）
 ├── examples/              示例产物
-├── tests/                 单元测试
+├── tests/                 单元测试（139 项，纯标准库，无第三方测试框架）
+├── .github/
+│   ├── workflows/ci.yml   持续集成：Linux 三档 Python + Windows 各跑一遍自测 / 单测 / 分发扫描
+│   ├── ISSUE_TEMPLATE/    字段识别失败模板（由脚本生成，勿手改）
+│   └── PULL_REQUEST_TEMPLATE.md
+├── requirements.txt       依赖清单：核心零依赖，可选增强逐条说明缺了会怎样
+├── SECURITY.md            安全与隐私政策（含**私密**报告漏洞的通道）
 └── docs/                  详细文档（demo/ 为在线演示）
 ```
 
@@ -209,8 +235,9 @@ OpenWangShen/
 | `wangshen.py sheet --profile p.json --labels-file L.txt` | 生成填写清单 |
 | `wangshen.py sheethtml --in 填写清单.md` | 可复制清单页（点一下就复制） |
 | `wangshen.py report` | 反馈包：把填不上的框整理成可提交的 Issue |
-| `wangshen.py report --mailto` | 同上，再加一条「一键邮件」（零 GitHub 账号通道） |
-| `wangshen.py inbox` | 回流收件台（维护者用）：汇总反馈，逐条决定收不收 |
+| `wangshen.py report --mailto` | 同上，再加一条「一键邮件」（这条通道**默认就带**，零 GitHub 账号） |
+| `wangshen.py inbox` | 回流收件台（维护者用）：汇总反馈，按优先级排序，逐条决定收不收 |
+| `wangshen.py inbox --accept-all` | 里面所有没重复的一次性收进问题库 |
 | `wangshen.py mask --profile p.json --in a.txt --out b.txt` | PII 脱敏 |
 | `wangshen.py mask --profile p.json --in b.txt --out c.txt --restore` | 还原 |
 | `wangshen.py issue --list` | 看问题库（踩过的坑） |
@@ -218,8 +245,9 @@ OpenWangShen/
 | `wangshen.py issue --report --out 问题库报告.md` | 生成问题库报告 |
 | `wangshen.py trial --issue Q-... --path "名=命令" --assert "指标 > 0"` | 多路径试跑择优 |
 | `wangshen.py trial ... --promote --动作 "..." --指纹 x` | 把胜出解法固化进策略库 |
+| `wangshen.py template --check` | 校验 Issue 模板与脚本选项集**没漂移**（CI 也跑这条） |
 | `wangshen.py selftest` | 全部自测 |
-| `wangshen.py guide` | 打印使用路径 |
+| `wangshen.py guide` | 打印使用路径 + **术语对照** |
 
 **常用选项**
 
@@ -228,11 +256,13 @@ OpenWangShen/
 | `--channel msedge\|chrome` | 用哪个浏览器内核（默认 msedge） |
 | `--proxy http://127.0.0.1:端口` | 浏览器代理。**Chromium 不读环境变量，必须显式传** |
 | `--headed` | 显示浏览器窗口（默认无头） |
+| `--wait 毫秒` | 打开页面后，等「真的出现输入控件」的最长时间（默认 8000）。等不到不算错，会由停手逻辑说明原因 |
 | `--screenshot 路径` | 截图留存 |
 | `--budget 秒` | 单站硬预算（默认 300，0 = 不限）。到点自动停手，转可复制清单页 |
 | `--html 路径` | 提前停手时，直接生成可复制清单页到该路径 |
 | `--connect 9222` | 接管已登录的浏览器（先跑 `wangshen.py browser`）。**只接管页面，不碰账号密码** |
 | `--allow-local` | 放行本机/内网地址（默认拒绝 `file://`、内网 IP，仅自测时需要） |
+| `--overwrite` | 允许覆盖同名产物。**默认不覆盖**：同名就改存带时间戳的新名，旧文件一个字节都不动 |
 
 ---
 
@@ -325,8 +355,13 @@ python scripts/wangshen.py report
   「性别=男」「政治面貌=党员」**不替换** —— 它们定位不到人，脱了反而让文本没法用
 - 脱敏后会自动做**二验**：再扫一遍确认无残留，未通过则拒绝输出
 - 映射表只在内存里存活一次，**不落盘、不写日志**
+- **产物默认不覆盖**：同名就改存带时间戳的新名（要覆盖请显式加 `--overwrite`）。
+  写入走原子替换，写一半崩掉不会留下半个文件
+- **写盘前有零真值反证**：反馈包/问题库掺进手机号、身份证、本机路径等，
+  一律**中止不写盘**（不是警告、不是脱敏后放行）
 
-详见 [docs/隐私设计.md](docs/隐私设计.md)。
+详见 [docs/隐私设计.md](docs/隐私设计.md) 与 [SECURITY.md](SECURITY.md)
+（后者含**私密**报告安全缺陷的通道 —— 这类问题请不要开公开 Issue）。
 
 ---
 

@@ -112,19 +112,27 @@ def parse_assert(text):
 
 
 def eval_asserts(asserts, metrics):
-    """逐条评断言。指标缺失**算不过**（绝不当作通过）。返回 (全过?, [说明])。"""
-    notes = []
+    """逐条评断言。指标缺失**算不过**（绝不当作通过）。
+
+    返回 (全过?, [人读说明], [机器码])。
+    第三个返回值是给自测用的**机器可读失败原因** —— 自测断言它，
+    而不是去匹配说明里的字面词（改一句措辞不该让测试变红）。
+    机器码取值：断言格式 / 指标缺失 / 类型不可比 / 断言未过。
+    """
+    notes, codes = [], []
     allok = True
     for a in asserts:
         p = parse_assert(a)
         if not p:
             allok = False
             notes.append("断言格式无法解析：%r" % a)
+            codes.append("断言格式")
             continue
         name, op, want = p
         if name not in (metrics or {}):
             allok = False
             notes.append("指标缺失「%s」→ 算不过（不猜）" % name)
+            codes.append("指标缺失")
             continue
         got = _to_num(metrics[name])
         try:
@@ -132,11 +140,13 @@ def eval_asserts(asserts, metrics):
         except TypeError:
             ok = False
             notes.append("指标「%s」类型不可比：%r %s %r" % (name, got, op, want))
+            codes.append("类型不可比")
             continue
         if not ok:
             allok = False
             notes.append("断言未过：%s = %r，要求 %s %r" % (name, got, op, want))
-    return allok, notes
+            codes.append("断言未过")
+    return allok, notes, codes
 
 
 def parse_probe_output(stdout):
@@ -219,7 +229,7 @@ def trial(issue, paths, asserts, by="", snapshot="", timeout=180, runner=run_pro
                         "指标": metrics, "耗时": d.get("_耗时")})
             results.append(rec)
             continue
-        allok, notes = eval_asserts(asserts, metrics)
+        allok, notes, _codes = eval_asserts(asserts, metrics)
         rec.update({"结果": "胜出候选" if allok else "失败",
                     "证据": evidence if allok else "；".join(notes)[:200],
                     "指标": metrics, "耗时": d.get("_耗时")})
@@ -398,8 +408,12 @@ def _selftest():
     check("② 断言不过：命中 0 > 0", not eval_asserts(["标签命中数 > 0"], {"标签命中数": 0})[0])
     check("③ 指标缺失 → 算不过（绝不放过）",
           not eval_asserts(["标签命中数 > 0"], {})[0])
-    check("④ 缺指标的说明写出来了",
-          "指标缺失" in eval_asserts(["x > 0"], {})[1][0])
+    check("④ 缺指标时给出的失败原因是**机器码**（不靠字面措辞）",
+          eval_asserts(["x > 0"], {})[1] and
+          eval_asserts(["x > 0"], {})[2] == ["指标缺失"],
+          eval_asserts(["x > 0"], {})[2])
+    check("④b 失败原因里点名了**缺哪个指标**（这是数据，不是文案）",
+          "x" in eval_asserts(["x > 0"], {})[1][0])
     check("⑤ 多断言：一条不过即不过",
           not eval_asserts(["a > 0", "b == 0"], {"a": 1, "b": 1})[0])
     check("⑥ 断言格式错 → 不过",

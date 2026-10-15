@@ -1,0 +1,23 @@
+# OpenWangShen 依赖清单
+# ======================
+# 先说最重要的一句：**核心功能零第三方依赖**。
+# 所有脚本只用 Python 3.8+ 标准库 —— 认字段、生成清单、脱敏、问题库、
+# 反馈回流、分发前扫描，全都 `git clone` 下来就能跑。
+#
+# 下面这些是**可选增强**。缺了不会崩：对应功能会明确告诉你装哪个、或者
+# 给一条不需要它的替代做法（这是本项目的约定，不静默失败）。
+
+# ---- 自动填表（wangshen.py fill / browser）----
+# 装完还要跑一次浏览器内核下载：
+#     pip install playwright && playwright install chromium
+playwright>=1.40
+
+# ---- 直接读 .docx 简历（wangshen.py resume）----
+# 不想装也行：用 Word 把简历另存为「纯文本 (.txt)」再导入。
+python-docx>=1.1
+
+# ---- 直接读 .pdf 简历（wangshen.py resume）----
+# 两个装哪个都行：pdfplumber 优先，装不上会自动退回 pypdf。
+# 不想装也行：把简历另存为 .txt。
+pdfplumber>=0.11
+pypdf>=4.0

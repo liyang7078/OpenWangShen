@@ -30,7 +30,9 @@ make_sheet.py · 网申填写清单生成器
 """
 
 import argparse
+import contextlib
 import datetime
+import io
 import os
 import sys
 import tempfile
@@ -174,7 +176,130 @@ def collect_attachments(labels, fields, profile, index):
     return out
 
 
-def main():
+def build(labels, fields, profile, ctx):
+    """算出清单正文（不打印、不落盘）。
+
+    把「算」与「打印/写盘」分开，自测才能断言**算出来的东西**，
+    而不必去抓屏匹配文案。返回 (content, rows, ready, miss, attach, unmatched)。
+    """
+    index = core.build_index(fields)
+    rows, unmatched, _ = build_rows(labels, fields, profile, index)
+    attach = collect_attachments(labels, fields, profile, index)
+    head, ready, miss = render(rows, ctx)
+    body = render_attach(attach, ctx)
+
+    # 未命中字段（页面有、规则库没有）如实告知，不猜
+    tail = ""
+    if unmatched:
+        tail = ("\n## 五、规则库未命中（需你手动填写）\n\n"
+                + "\n".join("- %s" % u for u in unmatched) + "\n")
+    return head + "\n" + body + tail, rows, ready, miss, attach, unmatched
+
+
+def selftest():
+    ok, bad = [0], [0]
+
+    def check(name, cond, extra=""):
+        if cond:
+            ok[0] += 1
+            print("  [OK] %s" % name)
+        else:
+            bad[0] += 1
+            print("  [FAIL] %s %s" % (name, extra))
+
+    fx = os.path.join(core.PROJECT_ROOT, "fixtures")
+    prof_path = os.path.join(fx, "档案_示例.json")
+    labels_path = os.path.join(fx, "页面字段_示例.txt")
+    fields = core.load_rules(None)
+    profile = core.load_profile(prof_path)
+    with open(labels_path, encoding="utf-8") as fh:
+        labels = [ln.strip() for ln in fh if ln.strip()]
+    ctx = {"now": "2026-10-16 09:00", "company": "示例集团", "job": "财务会计岗"}
+
+    content, rows, ready, miss, attach, unmatched = build(labels, fields, profile, ctx)
+
+    check("① 清单非空且以标题开头",
+          content.strip() != "" and content.startswith("# "), content[:20])
+    check("② 每个页面标签都有归宿（就绪／缺项／附件／未命中）",
+          len(rows) + len(attach) + len(unmatched) == len(labels),
+          (len(rows), len(attach), len(unmatched), len(labels)))
+    check("③ 就绪项的值逐条等于档案里的值",
+          bool(ready) and all(str(r["值"]) == str(profile.get(r["键"], r["值"]))
+                              for r in ready),
+          len(ready))
+    check("④ 就绪与缺项互斥，且并集 == rows",
+          not (set(id(r) for r in ready) & set(id(r) for r in miss))
+          and len(ready) + len(miss) == len(rows),
+          (len(ready), len(miss), len(rows)))
+    check("⑤ 缺项行在正文里带出档案键（`键` 代码跨度）",
+          all("`%s`" % r["键"] in content for r in miss),
+          [r["键"] for r in miss])
+    check("⑥ 附件不进就绪／缺项表（各归各的节）",
+          not (set(r["键"] for r in attach) & set(r["键"] for r in rows)))
+
+    # ---- 隐私红线：真值只写进清单文件，终端一个都不打印 ----
+    tmpd = tempfile.mkdtemp(prefix="ows-sheet-")
+    dry = os.path.join(tmpd, "绝不落盘.md")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = main(["--profile", prof_path, "--labels-file", labels_path,
+                   "--dry-run", "--out", dry])
+    printed = buf.getvalue()
+    values = [str(v) for k, v in profile.items()
+              if not str(k).startswith("_") and len(str(v)) >= 4]
+    check("⑦ --dry-run 真的不落盘", rc == 0 and not os.path.exists(dry))
+    check("⑧ 终端输出里不含档案里的任何真值", not [v for v in values if v in printed],
+          [v for v in values if v in printed][:3])
+    check("⑨ 而清单文件本身含值（证明「不打印」不是因为没算出来）",
+          any(str(r["值"]) in content for r in ready))
+
+    # ---- 未命中的标签：如实告知，绝不猜 ----
+    bogus = "这个标签规则库里没有"
+    c2, rows2, _r2, _m2, _a2, unm2 = build(labels + [bogus], fields, profile, ctx)
+    check("⑩ 规则库不认识的标签进「未命中」，不猜值",
+          unm2 == [bogus] and len(rows2) == len(rows), unm2)
+    check("⑪ 未命中项在正文里点名（不静默丢弃）",
+          bogus in c2 and "未命中" in c2)
+
+    # ---- 不给页面标签：全量列举，必填优先 ----
+    c3, rows3, _r3, _m3, a3, unm3 = build(None, fields, profile, ctx)
+    check("⑫ 无标签时按规则库全量列举，且无「未命中」",
+          len(rows3) > 0 and unm3 == [], (len(rows3), unm3))
+    flags = [r["必填"] for r in rows3]
+    check("⑬ 全量列举里必填排在选填之前",
+          flags == sorted(flags, key=lambda b: not b), flags[:6])
+    check("⑭ 全量列举不含附件字段，附件另计",
+          not any(core.is_attachment(r["键"]) for r in rows3) and a3 == [])
+
+    # ---- 覆盖语义：脚本自己拼的名字不覆盖；--overwrite 才覆盖 ----
+    tgt = os.path.join(tmpd, "填写清单.md")
+    with open(tgt, "w", encoding="utf-8") as fh:
+        fh.write("旧内容")
+    buf2 = io.StringIO()
+    with contextlib.redirect_stdout(buf2):
+        rc2 = main(["--profile", prof_path, "--labels-file", labels_path,
+                    "--out", tgt])
+    with open(tgt, encoding="utf-8") as fh:
+        kept = fh.read()
+    extra = [f for f in os.listdir(tmpd) if f != "填写清单.md"]
+    check("⑮ 给了 --out 但没给 --overwrite → 不覆盖，原文件不动",
+          rc2 == 0 and kept == "旧内容", kept[:10])
+    check("⑯ 且确实另存出了新文件（不是默默丢弃）", len(extra) == 1, extra)
+
+    buf3 = io.StringIO()
+    with contextlib.redirect_stdout(buf3):
+        rc3 = main(["--profile", prof_path, "--labels-file", labels_path,
+                    "--out", tgt, "--overwrite"])
+    with open(tgt, encoding="utf-8") as fh:
+        overwritten = fh.read()
+    check("⑰ 显式 --overwrite 才覆盖",
+          rc3 == 0 and "旧内容" not in overwritten and "网申填写清单" in overwritten)
+
+    print("\n自测结果：%d 通过 / %d 失败" % (ok[0], bad[0]))
+    return 0 if bad[0] == 0 else 1
+
+
+def main(argv=None):
     ap = argparse.ArgumentParser(description="生成网申填写清单（保底模式）")
     ap.add_argument("--profile", help="本机档案 JSON 路径")
     ap.add_argument("--rules", help="字段规则库路径（默认 assets/字段规则_通用.json）")
@@ -189,29 +314,15 @@ def main():
     ap.add_argument("--overwrite", action="store_true",
                     help="允许覆盖同名文件（默认不覆盖，自动加时间戳）")
     ap.add_argument("--selftest", action="store_true", help="用内置虚构数据自测")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     if args.selftest:
-        fx = os.path.join(core.PROJECT_ROOT, "fixtures")
-        args.profile = os.path.join(fx, "档案_示例.json")
-        args.labels_file = os.path.join(fx, "页面字段_示例.txt")
-        args.company = "示例集团"
-        args.job = "财务会计岗"
-        # 自测产物写进系统临时目录 —— 绝不落回仓库。
-        # 写回 examples/ 会把已提交的示例文件刷出新时间戳、弄脏工作区。
-        args.out = args.out or os.path.join(tempfile.gettempdir(),
-                                            "OpenWangShen_自测_填写清单.md")
-        # 固定路径 + 允许覆盖，避免临时目录堆一堆时间戳文件
-        args.overwrite = True
-        print("【自测模式】使用 fixtures/ 下的虚构数据")
-        print("        自测产物：%s" % args.out)
-        print("        （写在系统临时目录，不写入仓库）")
+        return selftest()
 
     if not args.profile:
         ap.error("必须提供 --profile（或使用 --selftest）")
 
     fields = core.load_rules(args.rules)
-    index = core.build_index(fields)
     profile = core.load_profile(args.profile)
 
     labels = None
@@ -221,24 +332,12 @@ def main():
         with open(args.labels_file, "r", encoding="utf-8") as f:
             labels = [ln.strip() for ln in f if ln.strip()]
 
-    rows, unmatched, _ = build_rows(labels, fields, profile, index)
-    attach = collect_attachments(labels, fields, profile, index)
-
     ctx = {
         "now": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
         "company": args.company, "job": args.job,
         "url": args.url, "resume": args.resume,
     }
-    head, ready, miss = render(rows, ctx)
-    body = render_attach(attach, ctx)
-
-    # 未命中字段（页面有、规则库没有）如实告知，不猜
-    tail = ""
-    if unmatched:
-        tail = ("\n## 五、规则库未命中（需你手动填写）\n\n"
-                + "\n".join("- %s" % u for u in unmatched) + "\n")
-
-    content = head + "\n" + body + tail
+    content, rows, ready, miss, attach, unmatched = build(labels, fields, profile, ctx)
 
     print("清单生成完成")
     print("  页面字段：%s" % (len(labels) if labels else "（未提供，按规则库全量列举）"))
@@ -254,18 +353,12 @@ def main():
     if not out:
         out = os.path.join(os.getcwd(), "填写清单.md")
 
-    if os.path.exists(out) and not args.overwrite:
-        stem, ext = os.path.splitext(out)
-        out = "%s_%s%s" % (stem,
-                           datetime.datetime.now().strftime("%Y%m%d%H%M%S"), ext)
-        print("  同名文件已存在，改存为：%s" % out)
-
-    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
-    # newline="" 关掉平台换行转换：Windows 上会写成 CRLF，与仓库
-    # .gitattributes 的 eol=lf 约定冲突。统一出 LF。
-    with open(out, "w", encoding="utf-8", newline="") as f:
-        f.write(content)
-    print("  已写入：%s" % out)
+    # 统一 safe_write（2026-10-16）：脚本自己拼的默认名 **不覆盖**（换名另存），
+    # 用户显式给了 --out 才由 --overwrite 决定。原子替换，不留半个文件。
+    wrote = core.safe_write(out, content, overwrite=bool(args.out and args.overwrite))
+    if os.path.abspath(wrote) != os.path.abspath(out):
+        print("  同名文件已存在，改存为：%s" % wrote)
+    print("  已写入：%s" % wrote)
     return 0
 
 

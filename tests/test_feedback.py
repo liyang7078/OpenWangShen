@@ -9,11 +9,28 @@ test_feedback.py · 回流链的回归测试
   ② 考生侧产出的条目，作者侧收得进来 —— 一条完整闭环，键名逐项对得上
   ③ 链上用到的键名一律落在词表内（否则档案会「看着填了、实际取不到」）
 
+另外钉住四组「后来补上的保证」：
+  ④ 统一产物写入 `core.safe_write`：原子替换 / 默认不覆盖 / 基准目录校验
+  ⑤ 面板化写入的纯函数（地区切分、控件分类、日期候选、报错翻译）
+  ⑥ 作者侧收件台的优先级排序与陈旧提醒（只记时间与计数，不记真值）
+  ⑦ Issue 模板与脚本选项集不漂移（模板是生成的，改了选项集必须重生成）
+
+断言的写法约定
+--------------
+断言**结构化事实**，不匹配文案：改一句提示语不该让测试变红，
+但删掉一条保证必须变红。所以这里解析 HTML 成树、断言 `(机器码, 数据)`，
+而不是 `assertIn("某句话", 输出)`。
+
 运行：python -m unittest discover -s tests
 """
 
+import argparse
+import contextlib
+import datetime
+import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -24,9 +41,13 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
 import core                   # noqa: E402
+import fill_form              # noqa: E402
+import gen_issue_template     # noqa: E402
+import htmlprobe              # noqa: E402
 import import_resume          # noqa: E402
 import inbox                  # noqa: E402
 import issue_registry as reg  # noqa: E402
+import make_sheet             # noqa: E402
 import report_feedback as rf  # noqa: E402
 import sheet_html             # noqa: E402
 
@@ -61,7 +82,10 @@ class TestZeroTruthGate(unittest.TestCase):
         """带真值的三段（填写结果 / 回读 / 附件结果）不得入库。"""
         ok, msgs = reg.guard("无真值", {"填写结果": [{"任何": "值"}]})
         self.assertFalse(ok)
-        self.assertTrue(any("禁用键" in k for k, _ in msgs))
+        # 断言**机器码**与命中的键路径（是数据），不匹配说明文字里的字面词
+        self.assertIn("禁用键", [kind for kind, _ in msgs])
+        details = [detail for kind, detail in msgs if kind == "禁用键"]
+        self.assertTrue(details and all("填写结果" in d for d in details), details)
 
     def test_render_itself_contains_no_pii(self):
         self.assertEqual(reg.pii_scan(rf.render(DEMO)), [])
@@ -193,6 +217,8 @@ class TestResumeImport(unittest.TestCase):
 
 
 class TestSheetHtml(unittest.TestCase):
+    """可复制清单页：断言**结构**与**往返**，不匹配文案。"""
+
     def test_parse_two_sections(self):
         md = "\n".join([
             "| 生成时间 | 2026-10-15 22:00 |",
@@ -209,16 +235,64 @@ class TestSheetHtml(unittest.TestCase):
         self.assertEqual(meta.get("生成时间"), "2026-10-15 22:00")
         self.assertTrue(ready[0]["必填"])
 
-    def test_html_escapes_values(self):
-        h = sheet_html.render_html([{"页面字段": "备注", "值": "<b>&x</b>",
-                                     "必填": False}], [], {})
-        self.assertIn("&lt;b&gt;&amp;x&lt;/b&gt;", h)
-        self.assertNotIn("<b>&x</b>", h)
+    def test_miss_key_has_backticks_stripped(self):
+        """清单里的代码跨度反引号必须在 HTML 消费端剥掉。
 
-    def test_html_blocks_are_closed(self):
+        漏剥的后果有两层：页面上直接显示 `通讯地址`；以及 data-key 属性被污染。
+        """
+        md = "\n".join([
+            "## 二、档案里没有、需要你补的（2 项）", "",
+            "| # | 页面字段 | 必填 | 对应档案键 |", "|---|---|---|---|",
+            "| 1 | 甲 | ✔ | `键甲` |",
+            "| 2 | 乙 |  | 键乙 |",
+        ])
+        _ready, miss, _meta = sheet_html.parse_md(md)
+        self.assertEqual([m["键"] for m in miss], ["键甲", "键乙"])
+
+    def test_html_escapes_values_by_round_trip(self):
+        """转义是否正确，看**解析回来等不等于原文**，而不是看实体串长什么样。"""
+        raw = "<b>&x</b>"
+        h = sheet_html.render_html([{"页面字段": "备注", "值": raw, "必填": False}],
+                                   [], {})
+        body = htmlprobe.parse(h)
+        vals = body.find_all(**{"class": "v"})
+        self.assertEqual(len(vals), 1)
+        self.assertEqual(vals[0].text(), raw)
+        self.assertEqual(body.find_all("b"), [], "值里的 <b> 被当成了标签")
+
+    def test_attributes_are_escaped(self):
+        """属性级转义：元信息里的引号不得溢出成新属性。"""
+        evil = '" onmouseover="alert(1)'
+        h = sheet_html.render_html([], [], {"企业": evil})
+        body = htmlprobe.parse(h)
+        metas = body.find_all(**{"class": "meta"})
+        self.assertEqual(len(metas), 1)
+        self.assertEqual(body.find_attr("onmouseover"), [])
+        self.assertIn(evil, metas[0].text())
+
+    def test_structure_is_well_formed(self):
         h = sheet_html.render_html([], [], {})
-        self.assertTrue(h.startswith("<!DOCTYPE html>"))
-        self.assertTrue(h.rstrip().endswith("</html>"))
+        body = htmlprobe.parse(h)
+        self.assertTrue(h.lstrip().startswith("<!DOCTYPE html>"))
+        for tag in ("html", "head", "body"):
+            self.assertEqual(len(body.find_all(tag)), 1, "缺少或重复 <%s>" % tag)
+
+    def test_accessibility_hooks_present(self):
+        """无障碍不靠颜色/表情：语义由 data-* 钩子承载（措辞可自由改）。"""
+        h = sheet_html.render_html([], [], {})
+        body = htmlprobe.parse(h)
+        self.assertEqual(len(body.find_all(**{"data-notice": "no-share"})), 1)
+        self.assertEqual(len(body.find_all(**{"data-legend": "todo"})), 1)
+
+    def test_miss_badge_is_text_not_colour_only(self):
+        h = sheet_html.render_html(
+            [], [{"页面字段": "通讯地址", "必填": True, "键": "通讯地址"}], {})
+        badge = htmlprobe.parse(h).find_all(**{"data-badge": "todo"})
+        self.assertEqual(len(badge), 1)
+        self.assertTrue(badge[0].text().strip(), "待补标记只靠颜色、没有文字")
+        # 待补值的前景色不能是弱化的灰
+        self.assertEqual(sheet_html._css_decls(h, ".miss .v").get("color"),
+                         "var(--ink)")
 
 
 class TestGuardDeformation(unittest.TestCase):
@@ -420,7 +494,32 @@ class TestResumeRegexCost(unittest.TestCase):
 
 
 class TestBudgetExitCode(unittest.TestCase):
-    """预算停手必须以退出码 5 反映出来，不能被收尾保险丝污染成 0。"""
+    """预算停手必须以退出码 5 反映出来，不能被收尾保险丝污染成 0。
+
+    这里断言**行为**，不去匹配 `run()` 的源码文本 —— 后者会在改格式时假红，
+    而且源码里写了 ≠ 真的这么跑。
+    """
+
+    def test_stop_reason_maps_to_5(self):
+        self.assertEqual(fill_form.exit_code({"停止原因": "超预算（300 秒）"}), 5)
+
+    def test_no_stop_reason_maps_to_0(self):
+        self.assertEqual(fill_form.exit_code({"可自动填": 5}), 0)
+        self.assertEqual(fill_form.exit_code({}), 0)
+
+    def test_empty_stop_reason_is_not_a_stop(self):
+        """空串不是「停手」—— 否则任何一次空赋值都会把成功报成失败。"""
+        self.assertEqual(fill_form.exit_code({"停止原因": ""}), 0)
+
+    def test_dangerous_url_is_refused_before_anything_else(self):
+        """URL 门禁在 run() 里最先执行：file:// 直接退 2，连档案都不加载。
+
+        这是真行为断言（不需要 playwright）：程序绝不把真值写进本机文件页。
+        """
+        ns = argparse.Namespace(url="file:///C:/secret.txt", allow_local=False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = fill_form.run(ns)
+        self.assertEqual(rc, 2)
 
     def test_fill_form_selftest_passes(self):
         import subprocess
@@ -430,19 +529,277 @@ class TestBudgetExitCode(unittest.TestCase):
                              stdout=subprocess.DEVNULL)
         self.assertEqual(rc, 0, "fill_form 自测未通过")
 
-    def test_stop_reason_maps_to_5(self):
-        """`run()` 里最终退出码的算法：有停止原因 ⇒ 5。"""
-        import inspect
-        import fill_form
-        src = inspect.getsource(fill_form.run)
-        self.assertIn('return 5 if reason else 0', src)
+
+class TestSafeWrite(unittest.TestCase):
+    """统一产物写入器：原子替换 + 默认不覆盖 + 基准目录校验（不可绕过）。"""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="ows_sw_")
+
+    def _read(self, p):
+        with open(p, encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_first_write_lands_at_exact_path(self):
+        p = os.path.join(self.dir, "a.txt")
+        self.assertEqual(core.safe_write(p, "hello"), os.path.abspath(p))
+        self.assertEqual(self._read(p), "hello")
+
+    def test_default_refuses_to_overwrite(self):
+        p = os.path.join(self.dir, "b.txt")
+        first = core.safe_write(p, "第一版")
+        second = core.safe_write(p, "第二版")
+        self.assertNotEqual(first, second, "默认必须换名另存")
+        self.assertEqual(self._read(first), "第一版", "旧文件被动了")
+        self.assertEqual(self._read(second), "第二版")
+
+    def test_overwrite_flag_replaces_in_place(self):
+        p = os.path.join(self.dir, "c.txt")
+        core.safe_write(p, "旧")
+        again = core.safe_write(p, "新", overwrite=True)
+        self.assertEqual(again, os.path.abspath(p))
+        self.assertEqual(self._read(p), "新")
+        self.assertEqual([f for f in os.listdir(self.dir) if f.startswith("c")],
+                         ["c.txt"], "覆盖时不该多出副本")
+
+    def test_root_baseline_refuses_outside(self):
+        outside_dir = tempfile.mkdtemp(prefix="ows_out_")
+        outside = os.path.join(outside_dir, "x.txt")
+        with self.assertRaises(ValueError):
+            core.safe_write(outside, "x", root=self.dir)
+        self.assertFalse(os.path.exists(outside), "越界被拒后不该留下任何文件")
+
+    def test_root_baseline_allows_inside(self):
+        p = os.path.join(self.dir, "sub", "in.txt")
+        self.assertTrue(core.safe_write(p, "ok", root=self.dir))
+
+    def test_creates_missing_directories(self):
+        p = os.path.join(self.dir, "深", "层", "e.txt")
+        core.safe_write(p, "x")
+        self.assertTrue(os.path.isfile(p))
+
+    def test_no_temp_residue_left_behind(self):
+        core.safe_write(os.path.join(self.dir, "d.txt"), "x")
+        self.assertEqual([f for f in os.listdir(self.dir) if f.startswith(".ows-w-")],
+                         [], "原子替换的临时文件必须清理干净")
+
+    def test_binary_mode_round_trips(self):
+        p = os.path.join(self.dir, "f.bin")
+        core.safe_write(p, b"\x00\x01\xff", binary=True)
+        with open(p, "rb") as fh:
+            self.assertEqual(fh.read(), b"\x00\x01\xff")
+
+
+class TestPanelHelpers(unittest.TestCase):
+    """面板化写入的纯函数：地区切分 / 控件分类 / 日期候选 / 报错翻译。
+
+    真站点上「自绘日历、级联下拉」填不进去，靠的就是这几个判据。
+    它们不碰浏览器，所以能在任何机器上回归。
+    """
+
+    def test_region_splits_into_levels(self):
+        self.assertEqual(fill_form.split_region("山东省济南市历下区"),
+                         ["山东省", "济南市", "历下区"])
+        self.assertEqual(fill_form.split_region("北京市海淀区"),
+                         ["北京市", "海淀区"])
+        self.assertEqual(fill_form.split_region("内蒙古自治区呼和浩特市"),
+                         ["内蒙古自治区", "呼和浩特市"])
+
+    def test_region_unparsable_stays_whole(self):
+        """切不动就整段试，宁可试错也不猜。"""
+        self.assertEqual(fill_form.split_region("历下区"), ["历下区"])
+        self.assertEqual(fill_form.split_region(""), [])
+
+    def test_panel_kind_detects_cascade_and_date(self):
+        cascade = {"label": "户籍所在地", "key": "户籍", "value": "山东省济南市历下区",
+                   "type": "text", "panel": True, "readonly": False}
+        self.assertEqual(fill_form.panel_kind(cascade, {"panel": True}), "cascade")
+        date = {"label": "毕业时间", "key": "毕业时间", "value": "2026-06",
+                "type": "text", "panel": True, "readonly": False}
+        self.assertEqual(fill_form.panel_kind(date, {"panel": True}), "date")
+
+    def test_panel_kind_ignores_plain_inputs(self):
+        """普通输入框走常规写入 —— 面板化是**兜底**，不是默认路径。"""
+        plain = {"label": "姓名", "key": "姓名", "value": "张三",
+                 "type": "text", "panel": False, "readonly": False}
+        self.assertEqual(fill_form.panel_kind(plain, {"panel": False, "readonly": False}), "")
+
+    def test_date_candidates_from_strict_to_loose(self):
+        cands = fill_form._date_candidates("2026-06-30")
+        self.assertEqual(cands[0], "2026-06-30", "整串必须排在最前（最严）")
+        self.assertIn("2026/06/30", cands)
+        self.assertIn("30", cands, "日历格子里的文本通常只有「日」")
+        self.assertEqual(fill_form._date_candidates("2026-06")[0], "2026-06")
+        self.assertEqual(fill_form._date_candidates(""), [])
+
+    def test_friendly_error_translates_and_keeps_original(self):
+        """超时/被拦截这类常见异常要译成人话，但**原文不能丢**。"""
+        msg = fill_form.friendly_error(Exception("Timeout 30000ms exceeded"))
+        self.assertTrue(msg.strip())
+        self.assertIn("30000ms", msg, "翻译时把原始信息弄丢了")
+
+    def test_friendly_error_never_returns_empty(self):
+        self.assertTrue(fill_form.friendly_error(Exception("随便什么")).strip())
+
+
+class TestInboxPriority(unittest.TestCase):
+    """作者侧收件台：优先级排序与陈旧提醒。状态文件只记时间与计数，不记真值。"""
+
+    def _row(self, sev="中", tag="新", number=1):
+        return {"item": {"严重度": sev}, "tag": tag, "issue": {"number": number}}
+
+    def test_severe_new_ranks_first(self):
+        rows = [self._row("低", number=1), self._row("高", number=2),
+                self._row("中", number=3)]
+        ordered = [r["issue"]["number"] for r in inbox.sort_rows(rows)]
+        self.assertEqual(ordered[0], 2, "高危新问题必须排最前")
+
+    def test_handled_rows_sink_to_the_bottom(self):
+        rows = [self._row("高", tag="已收", number=1), self._row("低", number=2)]
+        self.assertEqual([r["issue"]["number"] for r in inbox.sort_rows(rows)][-1], 1)
+
+    def test_priority_is_a_bounded_rank(self):
+        for sev in ("高", "中", "低"):
+            for tag in ("新", "批内重复", "同字段", "已收", "已忽略"):
+                rank, why = inbox.priority_of(self._row(sev, tag))
+                self.assertIn(rank, (1, 2, 3, 4), (sev, tag, rank))
+                self.assertTrue(why.strip())
+
+    def test_unknown_severity_falls_back_to_middle(self):
+        """没见过的新取值不许崩，也不许当成「高危」插队。"""
+        rank, _why = inbox.priority_of(self._row("闻所未闻"))
+        self.assertEqual(rank, 2)
+
+    def test_stale_days_none_on_first_run(self):
+        self.assertIsNone(inbox.stale_days({}), "首次运行不该提醒")
+
+    def test_stale_days_counts_from_last_view(self):
+        now = datetime.datetime(2026, 10, 16, 9, 0)
+        self.assertEqual(inbox.stale_days({"上次查看": "2026-10-10 09:00"}, now=now), 6)
+
+    def test_stale_days_ignores_garbage(self):
+        self.assertIsNone(inbox.stale_days({"上次查看": "不是时间"}))
+
+    def test_state_file_holds_only_time_and_counts(self):
+        """状态文件是长期留存的产物，不许落任何条目级内容。"""
+        st = {"上次查看": "2026-10-16 09:00", "未决数": 3, "已收数": 1}
+        tmp = tempfile.mkdtemp(prefix="ows_state_")
+        p = os.path.join(tmp, "st.json")
+        inbox.save_state(st, path=p)
+        with open(p, encoding="utf-8") as fh:
+            blob = fh.read()
+        for banned in ("现象", "字段标签", "期望键", "标题", "手机", "邮箱"):
+            self.assertNotIn(banned, blob, "状态文件里出现了条目级内容：%s" % banned)
+
+
+class TestMakeSheet(unittest.TestCase):
+    """清单生成：标签归一、未命中如实告知、附件单列、缺项带出规则键。"""
+
+    @classmethod
+    def setUpClass(cls):
+        fx = os.path.join(ROOT, "fixtures")
+        cls.fields = core.load_rules()
+        cls.profile = core.load_profile(os.path.join(fx, "档案_示例.json"))
+        with open(os.path.join(fx, "页面字段_示例.txt"), encoding="utf-8") as fh:
+            cls.labels = [ln.strip() for ln in fh if ln.strip()]
+        cls.ctx = {"now": "2026-10-16 09:00", "company": "示例集团"}
+
+    def _build(self, labels, profile=None):
+        return make_sheet.build(labels, self.fields,
+                                self.profile if profile is None else profile,
+                                self.ctx)
+
+    def test_every_label_has_a_home(self):
+        _c, rows, _r, _m, attach, unmatched = self._build(self.labels)
+        self.assertEqual(len(rows) + len(attach) + len(unmatched), len(self.labels))
+        self.assertGreater(len(rows), 0)
+
+    def test_unknown_label_is_reported_not_guessed(self):
+        bogus = "这个标签规则库里没有"
+        _c, rows, _r, _m, _a, unmatched = self._build(self.labels + [bogus])
+        self.assertEqual(unmatched, [bogus], "不认识的标签必须如实点名")
+        self.assertEqual(len(rows), len(self._build(self.labels)[1]),
+                         "未命中的标签不该凭空多出一行")
+
+    def test_missing_key_becomes_a_miss_row_with_its_rule_key(self):
+        stripped = {k: v for k, v in self.profile.items() if k != "通讯地址"}
+        content, _rows, ready, miss, _a, _u = self._build(["通讯地址"], stripped)
+        self.assertEqual([r["键"] for r in miss], ["通讯地址"])
+        self.assertEqual(ready, [])
+        self.assertIn("`通讯地址`", content, "缺项行没带出该填哪个键")
+
+    def test_attachments_are_kept_out_of_the_data_rows(self):
+        _c, rows, _r, _m, attach, _u = self._build(self.labels)
+        self.assertFalse(set(r["键"] for r in attach) & set(r["键"] for r in rows))
+
+    def test_full_listing_puts_required_first(self):
+        _c, rows, _r, _m, attach, unmatched = self._build(None)
+        self.assertEqual(unmatched, [])
+        self.assertEqual(attach, [], "不给页面标签时不该推断出附件项")
+        flags = [r["必填"] for r in rows]
+        self.assertEqual(flags, sorted(flags, key=lambda b: not b))
+
+    def test_no_overwrite_by_default(self):
+        tmp = tempfile.mkdtemp(prefix="ows_ms_")
+        target = os.path.join(tmp, "清单.md")
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write("旧内容")
+        names = os.path.join(ROOT, "fixtures", "页面字段_示例.txt")
+        prof = os.path.join(ROOT, "fixtures", "档案_示例.json")
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = make_sheet.main(["--profile", prof, "--labels-file", names,
+                                  "--out", target])
+        with open(target, encoding="utf-8") as fh:
+            self.assertEqual(rc, 0)
+            self.assertEqual(fh.read(), "旧内容", "默认不该覆盖已有文件")
+        self.assertEqual(len(os.listdir(tmp)), 2, "应当另存出一个新文件")
+
+
+class TestIssueTemplateDrift(unittest.TestCase):
+    """Issue 模板是**生成的**：改了选项集却忘了重生成，必须能被发现。"""
+
+    def test_generated_template_is_in_sync(self):
+        text = gen_issue_template.build()
+        path = os.path.join(ROOT, ".github", "ISSUE_TEMPLATE", "字段识别失败.md")
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), text,
+                             "模板与脚本选项集漂移了：跑 python scripts/gen_issue_template.py")
+
+    def test_template_covers_every_system_choice(self):
+        text = gen_issue_template.build()
+        for name in rf.system_choices():
+            self.assertIn(name, text, "选项「%s」没进模板" % name)
+
+    def test_check_flags_a_tampered_template(self):
+        """反向：模板被改坏时 --check 必须返回非 0（否则漂移门是摆设）。
+
+        探针写在系统临时目录，**不碰仓库里的真模板** —— 测试不该有副作用。
+        """
+        tmp = tempfile.mkdtemp(prefix="ows_tpl_")
+        probe = os.path.join(tmp, "tampered.md")
+        with open(probe, "w", encoding="utf-8", newline="") as fh:
+            fh.write(gen_issue_template.build() + "\n<!-- 手改一行 -->\n")
+        self.assertEqual(gen_issue_template.main(["--check", "--out", probe]), 3)
+
+    def test_check_accepts_an_intact_template(self):
+        tmp = tempfile.mkdtemp(prefix="ows_tpl_")
+        probe = os.path.join(tmp, "ok.md")
+        with open(probe, "w", encoding="utf-8", newline="") as fh:
+            fh.write(gen_issue_template.build())
+        self.assertEqual(gen_issue_template.main(["--check", "--out", probe]), 0)
+
+    def test_missing_template_file_counts_as_drift(self):
+        """模板文件丢了也是漂移（不能把「读不到」当成「一致」）。"""
+        tmp = tempfile.mkdtemp(prefix="ows_tpl_")
+        self.assertEqual(
+            gen_issue_template.main(["--check", "--out", os.path.join(tmp, "无.md")]), 3)
 
 
 class TestInboxResilience(unittest.TestCase):
     """Issue 正文完全不可信（公开仓库，任何人能提）。"""
 
     def test_malformed_json_is_friendly(self):
-        import subprocess
+        """非法 JSON 要「像人一样拒绝」：退出码 2、说清是 JSON 的问题、不留 traceback。"""
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
                                          encoding="utf-8") as fh:
             fh.write('{"a": [1,2,')
@@ -453,8 +810,9 @@ class TestInboxResilience(unittest.TestCase):
                  "--from-file", bad],
                 capture_output=True, text=True, timeout=60)
             self.assertEqual(r.returncode, 2)
-            self.assertIn("不是合法 JSON", r.stdout)
-            self.assertNotIn("Traceback", r.stderr)
+            self.assertNotIn("Traceback", r.stderr, "非法输入不该抛出栈")
+            # 提「JSON」这个词是**必要信息**（告诉用户错在哪一类），不是措辞
+            self.assertIn("JSON", r.stdout)
         finally:
             os.unlink(bad)
 

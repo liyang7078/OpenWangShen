@@ -16,6 +16,7 @@ wangshen.py · OpenWangShen 统一入口
     python scripts/wangshen.py trial   --issue <id> --path ...     试跑多路径 → 择优 → 固化
     python scripts/wangshen.py report                              反馈包：填不上的框 → 可提交的 Issue
     python scripts/wangshen.py inbox                               回流收件台：汇总别人提的反馈
+    python scripts/wangshen.py template --check                    Issue 模板与脚本选项集是否一致
     python scripts/wangshen.py selftest                            全部自测
     python scripts/wangshen.py guide                               打印使用路径
 
@@ -57,6 +58,7 @@ CMDS = {
     "trial": ("issue_trial.py", "问题试验：多路径试跑 → 断言择优 → 固化进策略库"),
     "report": ("report_feedback.py", "反馈包（考生侧）：把填不上的框整理成可提交的 Issue"),
     "inbox": ("inbox.py", "回流收件台（作者侧）：汇总别人提的反馈，逐条决定收不收"),
+    "template": ("gen_issue_template.py", "由脚本选项集生成 Issue 模板（--check 防漂移）"),
 }
 
 
@@ -128,9 +130,22 @@ OpenWangShen · 推荐使用顺序
         python scripts/wangshen.py report
         答几个问题，它会生成一段可以直接贴成 Issue 的反馈。
         你踩的坑记下来，下一个人就不用再踩。
-        没有 GitHub 账号？加 --mailto 换一条「一键邮件」的路。
+        没有 GitHub 账号？不用加参数 —— 会自动给一条「一键邮件」的路
+        （本项目已配置反馈邮箱：assets/反馈渠道.json）。
         两条都没有的话，把生成的那段文字直接发给项目作者也可以。
 
+────────────────────────────────────────────────────────
+术语对照（这个项目里几个词到底指什么）
+  · 档案        = 你自己的那份 profile.json，存着姓名/手机号/学历这些真实信息。
+                  它**只在你本机**，程序不会把它发给任何地方。
+  · 字段标签     = 网页上那个框旁边写的字，比如「联系人手机*」。程序靠它判断
+                  「这是哪一项」。带星号的 * 表示必填。
+  · 指纹        = 一类**页面特征**的代号，比如「上传框被隐藏了」「下拉是自绘的」。
+                  它不认站点：今天 A 站、明天 B 站，形态一样就复用同一条经验。
+  · 试用/固化    = 同一个坑想出好几种修法，逐个真跑一遍比成绩，赢的那条才写进
+                  策略库长期生效。没试赢过的不许固化。
+  · 三条线      = ① 绝不代替你点提交 ② 绝不填密码、绝不碰验证码
+                  ③ 你的身份信息不出本机。
 ────────────────────────────────────────────────────────
 三条不可越过的线
   1. 绝不代替你点提交
@@ -146,7 +161,7 @@ def selftest():
     print("=" * 56)
     results = []
     for name, args in [
-        ("core.py", ["core.py"]),
+        ("core.py", ["core.py", "--selftest"]),
         ("check_profile.py", ["check_profile.py", "--selftest"]),
         ("fill_form.py", ["fill_form.py", "--selftest"]),
         ("start_browser.py", ["start_browser.py", "--selftest"]),
@@ -160,6 +175,9 @@ def selftest():
         ("sheet_html.py", ["sheet_html.py", "--selftest"]),
         ("report_feedback.py", ["report_feedback.py", "--selftest"]),
         ("inbox.py", ["inbox.py", "--selftest"]),
+        ("gen_issue_template.py", ["gen_issue_template.py", "--selftest"]),
+        # 执行点（不是文档承诺）：Issue 模板若与脚本选项集漂移，这里直接红。
+        ("Issue 模板一致性", ["gen_issue_template.py", "--check"]),
     ]:
         print("\n--- %s ---" % name)
         rc = subprocess.call([PY, os.path.join(HERE, args[0])] + args[1:])

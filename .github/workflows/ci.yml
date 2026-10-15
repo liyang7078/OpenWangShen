@@ -1,0 +1,117 @@
+# OpenWangShen 持续集成
+# ======================
+# 三条纪律，都对应本仓踩过的坑：
+#
+#   ① 核心零第三方依赖 —— 不许在 CI 里偷偷装上依赖把问题藏起来。
+#      这里专门有一支「确认第三方包未安装」的探针：核心自测必须
+#      在**干净解释器**里全绿，否则说明有人把「可选增强」变成了硬依赖。
+#   ② 自测是执行点，不是文档承诺 —— 跟 `wangshen.py selftest` 用同一批命令，
+#      本地绿而 CI 红，就说明自测漏了环境相关的分支。
+#   ③ 跨平台 —— 本项目主要面向 Windows 用户，而开发机上最容易漏的是
+#      控制台编码与路径分隔符。所以 Windows 另跑一支。
+
+name: CI
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支的旧任务自动取消，省 runner
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ------------------------------------------------------------------
+  # 主干：Linux 多版本 × 零依赖自测
+  # ------------------------------------------------------------------
+  selftest:
+    name: 自测（ubuntu / py${{ matrix.python-version }}）
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 下限按 README 承诺（3.8+）从宽覆盖；上限跟到最新稳定版。
+        python-version: ["3.9", "3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # 这一句是「零依赖」的执行点：装了任何可选增强，这里直接红。
+      # 不要删 —— 它保证下面的自测跑在干净解释器里。
+      # 注意：必须写成单行 `python -c`。YAML 块里的 heredoc 会把每行都带上
+      # 缩进，Python 顶层语句不允许前导空格，会直接 IndentationError。
+      - name: 确认第三方包未安装（干净解释器）
+        run: |
+          echo "可选增强包（预期：一个都不该有）——"
+          python -c "import importlib.util,sys; opt=('playwright','docx','pdfplumber','pypdf'); bad=[m for m in opt if importlib.util.find_spec(m) is not None]; print('  已安装：', bad or '无'); sys.exit(1 if bad else 0)"
+          echo "已确认是干净解释器 —— 下面的核心自测结果才可信"
+
+      - name: 全部脚本内置自测
+        run: python scripts/wangshen.py selftest
+
+      - name: 单元测试
+        run: python -m unittest discover -s tests -v
+
+      - name: 分发前扫描（零真值 / 无私有路径 / 可公开）
+        run: python scripts/dist_check.py
+
+  # ------------------------------------------------------------------
+  # 跨平台：Windows 上再过一遍（控制台编码 / 路径分隔符）
+  # ------------------------------------------------------------------
+  windows:
+    name: 自测（windows / py3.12）
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 故意不设 PYTHONUTF8 —— 就是要走真实 Windows 控制台，
+      # 验证脚本自己的编码兜底是有效的（本仓曾在此处翻过车）。
+      - name: 全部脚本内置自测
+        run: python scripts/wangshen.py selftest
+
+      - name: 单元测试
+        run: python -m unittest discover -s tests
+
+      - name: 分发前扫描
+        run: python scripts/dist_check.py
+
+  # ------------------------------------------------------------------
+  # 可选增强：证明「装了更好用」而不是「不装就崩」
+  # ------------------------------------------------------------------
+  optional-deps:
+    name: 可选增强（docx / pdf）
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 只装纯 Python 的解析库；playwright 要下浏览器内核，太重且易抖，
+      # 不在 CI 里跑（自动填表在缺 playwright 时必须优雅降级，此事已由
+      # 上面 selftest 那支在「未安装」状态下验证过）。
+      - name: 安装可选依赖
+        run: python -m pip install --quiet python-docx pdfplumber pypdf
+
+      - name: 装了依赖后，简历导入自测仍须全绿
+        run: python scripts/import_resume.py --selftest
+
+      - name: 装了依赖后，全量自测仍须全绿
+        run: python scripts/wangshen.py selftest

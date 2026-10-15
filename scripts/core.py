@@ -16,10 +16,12 @@ OpenWangShen 核心库
 许可：MIT
 """
 
+import datetime
 import json
 import os
 import re
 import sys
+import tempfile
 
 # Windows 控制台默认编码可能不是 UTF-8，这里兜底，避免中文 print 直接崩
 try:
@@ -518,7 +520,161 @@ def url_gate(url, allow_local=False):
     return True, ""
 
 
+# --------------------------------------------------------------------------
+# 统一产物写入（2026-10-16 新增）
+# --------------------------------------------------------------------------
+# 为什么要有这一个函数
+# --------------------
+# 四个脚本各自实现了「同名不覆盖」，还有几个根本没实现 —— 于是同一件事有四种
+# 写法、三种行为。更要紧的是两条容易漏掉的性质：
+#   · **路径基准**：`--out` 是可以被外部传入的，不加校验就能把产物写到仓库外，
+#     甚至覆盖别人的文件。这是一条安全性质，不能靠每个脚本自觉。
+#   · **原子性**：写到一半崩掉会留下半个文件；下次看到「文件存在」就以为写完了。
+#     ⇒ 先写临时文件再 `os.replace`（同目录内替换在 POSIX/NTFS 上都是原子操作）。
+#
+# 覆盖策略（与 .gitignore 的注释同源）
+# ------------------------------------
+# 默认 **不覆盖**：存在同名就加时间戳另存。用户显式给了 `--out` 且加 `--overwrite`
+# 时才覆盖 —— 「我让你写这个名字」和「脚本自己拼的名字」是两回事，前者是授权。
+def ensure_dir(path):
+    """确保某文件所在目录存在。"""
+    d = os.path.dirname(os.path.abspath(path))
+    if d:
+        os.makedirs(d, exist_ok=True)
+    return d
+
+
+def unique_path(path):
+    """
+    同名则加时间戳（再撞则补序号）。返回一个**当前不存在**的路径。
+    与 make_sheet.py / make_checklist.py 的既有约定一致。
+    """
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(path)
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    cand = "%s_%s%s" % (stem, stamp, ext)
+    n = 1
+    while os.path.exists(cand):
+        cand = "%s_%s-%d%s" % (stem, stamp, n, ext)
+        n += 1
+    return cand
+
+
+def in_root(path, root):
+    """`path` 是否落在 `root` 之内（含 `root` 自身）。用于路径基准校验。"""
+    try:
+        a = os.path.abspath(path)
+        b = os.path.abspath(root)
+        return os.path.commonpath([a, b]) == b
+    except (ValueError, OSError):
+        return False
+
+
+def safe_write(path, text, overwrite=False, root=None, binary=False):
+    """
+    统一产物写入。返回**最终**绝对路径（可能因防覆盖而改了名字）。
+
+    参数
+    ----
+      overwrite : True 才允许覆盖同名文件；默认 False（改存带时间戳的新名）
+      root      : 给了就做路径基准校验，越界抛 ValueError（安全性质，不可绕过）
+      binary    : True 时 `text` 按 bytes 写（截图等）
+
+    失败一律抛异常（不吞），调用方自己决定怎么告诉用户。
+    """
+    path = os.path.abspath(
+        path.decode("utf-8") if isinstance(path, bytes) else path)
+    if root is not None and not in_root(path, root):
+        raise ValueError("拒绝写入基准目录之外：%s（基准 %s）"
+                         % (path, os.path.abspath(root)))
+    dest = path if overwrite else unique_path(path)
+    ensure_dir(dest)
+    # 原子替换：临时文件与目标同目录（跨盘替换不原子）
+    fd, tmp = tempfile.mkstemp(prefix=".ows-w-", dir=os.path.dirname(dest))
+    os.close(fd)
+    try:
+        with open(tmp, "wb" if binary else "w",
+                  **({} if binary else {"encoding": "utf-8", "newline": ""})) as f:
+            f.write(text)
+        os.replace(tmp, dest)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return dest
+
+
+def selftest():
+    """core 的自测：只覆盖纯函数，且**不写仓库**（产物落系统临时目录）。"""
+    ok, bad = [0], [0]
+
+    def check(name, cond, extra=""):
+        if cond:
+            ok[0] += 1
+            print("  [OK] %s" % name)
+        else:
+            bad[0] += 1
+            print("  [FAIL] %s %s" % (name, extra))
+
+    # ---- 规则库 ----
+    fs = load_rules()
+    idx = build_index(fs)
+    check("① 规则库可读且有字段", len(fs) > 0, len(fs))
+    check("② 标签索引非空", len(idx) > 0, len(idx))
+    check("③ 字段键唯一", len({f["键"] for f in fs}) == len(fs))
+    check("④ 归一化去星号/括号/空白",
+          norm("姓名（中文）*") == "姓名" and norm("Full  Name") == "fullname")
+    check("⑤ 泛化短标签拒写", map_one("日期", idx, fs)[0] is None)
+    check("⑥ 值域别名可归一", canonical_value("大学本科") == "本科")
+    check("⑦ 选项匹配走别名", match_option("本科", ["大学本科"]) == "大学本科")
+    check("⑧ 优先级排序：越小越先", priority_rank("姓名") <= priority_rank("__不存在__"))
+
+    # ---- URL 门禁 ----
+    check("⑨ 公网 http 放行", url_gate("https://job.example.com/x")[0] is True)
+    check("⑩ file:// 拒绝", url_gate("file:///C:/x")[0] is False)
+    check("⑪ 内网 IP 拒绝", url_gate("http://192.168.1.1/")[0] is False)
+
+    # ---- safe_write ----
+    import shutil
+    tmp = tempfile.mkdtemp(prefix="core_sw_")
+    try:
+        p1 = safe_write(os.path.join(tmp, "a.txt"), "第一版")
+        check("⑫ safe_write 落盘且内容正确",
+              os.path.isfile(p1) and open(p1, encoding="utf-8").read() == "第一版")
+        p2 = safe_write(os.path.join(tmp, "a.txt"), "第二版")
+        check("⑬ 默认不覆盖：换名另存",
+              p2 != p1 and os.path.isfile(p2)
+              and open(p1, encoding="utf-8").read() == "第一版")
+        p3 = safe_write(os.path.join(tmp, "a.txt"), "第三版", overwrite=True)
+        check("⑭ 显式 overwrite 才覆盖",
+              p3 == os.path.abspath(os.path.join(tmp, "a.txt"))
+              and open(p3, encoding="utf-8").read() == "第三版")
+        try:
+            safe_write(os.path.join(tmp, "b.txt"), "x", root=os.path.join(tmp, "sub"))
+            inside = False
+        except ValueError:
+            inside = True
+        check("⑮ 越过基准目录被拒", inside)
+        check("⑯ in_root 判据正确",
+              in_root(os.path.join(tmp, "s", "c.txt"), tmp)
+              and not in_root(os.path.dirname(tmp) + "_other", tmp))
+        # 原子性：临时文件不得残留
+        check("⑰ 无临时文件残留",
+              not [x for x in os.listdir(tmp) if x.startswith(".ows-w-")],
+              os.listdir(tmp))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    print("\n自测结果：%d 通过 / %d 失败" % (ok[0], bad[0]))
+    return 0 if bad[0] == 0 else 1
+
+
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        sys.exit(selftest())
     # 便于手工快速验证：只打印规则库统计，不涉及任何档案
     fs = load_rules()
     idx = build_index(fs)

@@ -51,6 +51,9 @@ import re
 import sys
 import unicodedata
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import core as _core  # noqa: E402
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ASSETS = os.path.join(HERE, "..", "assets")
 ISSUES = os.path.join(ASSETS, "问题库.jsonl")
@@ -196,7 +199,14 @@ def load_issues(path=ISSUES):
 
 
 def save_issues(items, path=ISSUES, backup=True):
-    """整库重写（状态更新需要）。**先备份**，且写盘前跑零真值反证。"""
+    """
+    整库重写（状态更新需要）。**先备份**，且写盘前跑零真值反证。
+
+    写入走 `core.safe_write`：**原子替换** —— 写一半崩掉不会留下半个问题库
+    （原来的写法是先 truncate 再写，中途失败就整库没了）。
+    路径基准校验由 `core.safe_write(root=…)` 提供；本函数**不限定基准**，
+    因为 `--issues` 允许指向备份/迁移用的库文件。
+    """
     text = "\n".join(json.dumps(x, ensure_ascii=False) for x in items) + "\n"
     ok, msgs = guard(text, items)
     if not ok:
@@ -207,8 +217,7 @@ def save_issues(items, path=ISSUES, backup=True):
         with open(path, "r", encoding="utf-8") as src, \
                 open(bak, "w", encoding="utf-8", newline="") as dst:
             dst.write(src.read())
-    with open(path, "w", encoding="utf-8", newline="") as fh:
-        fh.write(text)
+    _core.safe_write(path, text, overwrite=True)
     return True, [], bak
 
 
@@ -607,12 +616,12 @@ def main(argv=None):
         if not ok:
             print("[ERR] 零真值反证失败 —— **中止，不写盘**：")
             for k, v in msgs[:10]:
-                print("   - %s：%r" % (k, v))
+                print("   - %s：%s" % (k, v))      # v 已脱敏，不回显原值
             return 3
         if args.out:
-            with open(args.out, "w", encoding="utf-8", newline="") as fh:
-                fh.write(text)
-            print("已写入：%s" % args.out)
+            # 统一 safe_write：`--out` 是用户显式点名的目标 ⇒ 允许覆盖
+            wrote = _core.safe_write(args.out, text, overwrite=True)
+            print("已写入：%s" % wrote)
         else:
             print(text)
         return 0

@@ -303,24 +303,25 @@ def main(argv=None):
             out[k] = v
             added.append(k)
 
-    # ---- 同名保护（与 make_sheet.py 一致：默认换名，--overwrite 才覆盖）----
-    if (not args.merge) and os.path.isfile(dest) and not args.overwrite:
-        stem, ext = os.path.splitext(dest)
-        dest = "%s_%s%s" % (stem, datetime.datetime.now().strftime("%Y%m%d-%H%M%S"), ext)
-        print("[提示] 同名档案已存在，本次改存：%s" % os.path.basename(dest))
-        print("       要直接覆盖请加 --overwrite，要合并请用 --merge。")
-
     if args.merge and os.path.isfile(args.merge):
-        shutil.copy2(args.merge, args.merge + ".bak" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+        # 改既有档案 ⇒ 先备份（铁律：改任何既有文件，第一步先备份）
+        shutil.copy2(args.merge,
+                     args.merge + ".bak" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
 
-    os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
-    with open(dest, "w", encoding="utf-8", newline="") as fh:
-        json.dump(out, fh, ensure_ascii=False, indent=2)
+    # 统一 safe_write（2026-10-16）：原子替换 + 默认不覆盖同名（换名另存）。
+    # 合并（--merge）是**回写同一份档案**，属授权覆盖；新建时只有 --overwrite 才覆盖。
+    payload = json.dumps(out, ensure_ascii=False, indent=2)
+    wrote = core.safe_write(dest, payload,
+                            overwrite=bool(args.merge or args.overwrite),
+                            root=ROOT)
+    if os.path.abspath(wrote) != os.path.abspath(dest):
+        print("[提示] 同名档案已存在，本次改存：%s" % os.path.basename(wrote))
+        print("       要直接覆盖请加 --overwrite，要合并请用 --merge。")
 
     # ---- 报告：**只列键名，不列取值** ----
     missing = [k for k in required_keys(fields) if not str(out.get(k) or "").strip()]
     print("")
-    print("读入：%s ｜ %d 字" % (os.path.basename(args.infile), len(text)))
+    print("读入：%s ｜ 抽出 %d 项" % (os.path.basename(args.infile), len(got)))
     print("抽出：%d 项 —— %s" % (len(got), "、".join(got) or "（无）"))
     if added:
         print("本次填入：%d 项 —— %s" % (len(added), "、".join(added)))
@@ -329,10 +330,10 @@ def main(argv=None):
         print("原有值不动：%d 项 —— %s" % (len(kept), "、".join(kept)))
     print("待补必填：%d 项 —— %s" % (len(missing), "、".join(missing) or "（无）"))
     print("")
-    print("已写入：%s" % dest)
+    print("已写入：%s" % wrote)
     print("⚠️ 这份文件是你的真实信息，只放本机。别提交到 Git（.gitignore 已屏蔽）。")
     print("   接着体检一下：python scripts/wangshen.py check --profile %s"
-          % os.path.basename(dest))
+          % os.path.basename(wrote))
     return 0
 
 

@@ -51,6 +51,19 @@ python -m unittest discover -s tests
 python scripts/dist_check.py     # 确认没有真实信息混进仓库
 ```
 
+这几条**就是 CI 跑的命令**（Linux 三档 Python + Windows 各跑一遍）。
+本地绿而 CI 红，说明自测漏了环境相关的分支，请补上而不是删掉检查。
+
+改动了**选项集 / 词表 / Issue 模板**的，再加一条：
+
+```bash
+python scripts/gen_issue_template.py --check   # 模板与脚本选项集是否漂移
+```
+
+提交 PR 时请照
+[`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md)
+里的三条纪律自查：**零真值 / fail-closed / 执行点而非承诺**。
+
 ---
 
 ## 二、修 Bug / 加功能
@@ -68,6 +81,13 @@ python scripts/dist_check.py     # 确认没有真实信息混进仓库
 | **不代提交** | 任何代码路径都不得点击提交/投递类按钮 |
 | **不碰凭据** | 不得读取、填写、存储密码，不得代过人机验证 |
 | **值不出本机** | 真实值不得打印到 stdout、不得写入日志、不得随任何网络请求外发 |
+
+### 另外两条同样硬的
+
+| 约束 | 含义 |
+|---|---|
+| **fail-closed** | 判定不了就**拒绝**，不要"警告后放行"。本项目最忌讳的是"看起来成功了"——扫不全还报"可以分发"、写进去了又被页面丢掉还记"已填"，都属此类 |
+| **执行点而非承诺** | 任何新增的"保证"都要有一个能被 CI 跑红的断言（不是注释、不是 README 里的一句话）。改文案不该让测试变红；把保证删掉**必须**变红 |
 
 ---
 
@@ -166,26 +186,47 @@ python scripts/wangshen.py trial --issue Q-... --path ... --promote \
 
 ## 五、代码风格
 
-- Python：**能用标准库就用标准库**。`core.py` / `check_profile.py` /
-  `make_sheet.py` / `mask_pii.py` 保持零第三方依赖
+- Python：**能用标准库就用标准库**。核心链路（`core.py` / `check_profile.py` /
+  `make_sheet.py` / `mask_pii.py` / `sheet_html.py` / 反馈闭环全套）保持零第三方依赖；
+  CI 里有一支探针专门确认"没装第三方包"，装了反而会红
 - `fill_form.py` 允许依赖 `playwright`，但**必须**在缺依赖时优雅降级
 - 中文注释，面向非专业用户解释「为什么」而不只是「做什么」
-- 新增脚本请自带 `--selftest`
+- 新增脚本请自带 `--selftest`，且**断言要断言得动**：
+  - 不要 `assertTrue(x)` / `check("...", True)` 这类恒真断言
+  - 不要用 `assertIn("某句话", 输出)` 匹配**文案** —— 改措辞会假红，删掉整段保证却可能假绿。
+    HTML 产物请解析成树断言结构（见 `scripts/htmlprobe.py`），
+    需要语义就加 `data-*` 钩子
+  - 任何"不会有值"的否定结论，要先有"它确实该有值"的反向断言兜着，
+    否则空转也能绿
+- 写盘一律走 `core.safe_write()`（原子替换 + 默认不覆盖 + 可选基准目录校验）；
+  新增产物路径不要自己 `open(..., "w")`
 
 ---
 
 ## 六、报告字段识别失败
 
-提 Issue 时请附（**注意脱敏，不要贴真实个人信息**）：
+**不用自己排版** —— 跑一条命令，它问几个问题，然后给你一段可直接粘贴的文本：
+
+```bash
+python scripts/wangshen.py report
+```
+
+手工提 Issue 时请附（**注意脱敏，不要贴真实个人信息**）：
 
 ```
 页面字段标签：手机号码*
-页面所在的系统：北森 / Moka / 大易 / 其他
+页面所在的系统：北森 / Moka / 大易 / …（不知道就写「不知道」，别硬猜）
+站点域名：job.example.com（只填域名）
+页面技术栈：不确定 / Vue / React / …
+控件类型：文本框 / 下拉框 / 日期 / 地区级联 / …
 期望映射到：手机号
 实际结果：未命中
+缺口类别：标签取不到 / 控件不可见或被隐藏 / 下拉选不中 / …
 ```
 
-有了这三行，补规则就是几分钟的事。
+有了这些，补规则就是几分钟的事。完整表格见
+[`.github/ISSUE_TEMPLATE/字段识别失败.md`](.github/ISSUE_TEMPLATE/字段识别失败.md)
+（该文件由 `scripts/gen_issue_template.py` 生成，请勿手改）。
 
 ### 不用自己排版：跑 `report`
 

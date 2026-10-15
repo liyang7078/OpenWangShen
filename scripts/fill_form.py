@@ -42,6 +42,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -53,6 +54,82 @@ import issue_registry as reg  # noqa: E402
 # 视为「人工门」的字段类型：程序永不代填
 HUMAN_GATE_TYPES = {"password", "file"}
 CAPTCHA_HINTS = ("验证码", "captcha", "verify code", "短信验证", "动态码")
+
+# --------------------------------------------------------------------------
+# 自绘面板（2026-10-16 补全 P0-10）
+# --------------------------------------------------------------------------
+# 只读框/自绘日历/级联选择器：`fill` 与「JS 直写 value」都会**假成功** ——
+# 组件把值渲染在自己的面板里，DOM 的 value 根本没动。唯一可靠的办法是
+# 「点开面板 → 按文本点中那一项 → 以控件展示值回读判定」。
+PANEL_SETTLE_MS = 450        # 面板动画的等待上限（真实站实测 300~400ms 足够）
+PANEL_MAX_LEVELS = 3         # 级联最多点几级（省 / 市 / 区）
+PANEL_MAX_ITEMS = 400        # 单次采集的候选项上限（防超大虚拟列表拖死本机）
+
+# 日期类控件：值形如 2026-06-30 / 2026-07
+DATE_HINTS = ("日期", "时间", "年月", "生日", "起止", "起始", "截止")
+# 地区级联类控件：值是由「省/市/区」拼起来的串
+REGION_HINTS = ("籍贯", "户籍", "生源", "出生地", "地址", "省市", "地区", "所在")
+REGION_SEG_RE = re.compile(r"[^省市区县]+?(?:省|市|区|县|自治区|自治州|特别行政区)")
+
+
+def split_region(value):
+    """
+    把地区串切成级联需要的逐级片段。
+      "山东省济南市历下区" → ["山东省", "济南市", "历下区"]
+      "北京市海淀区"       → ["北京市", "海淀区"]
+      "内蒙古自治区呼和浩特市" → ["内蒙古自治区", "呼和浩特市"]
+    切不动 → 整体作一段（宁可按一段试，也不猜）。
+    """
+    s = str(value or "").strip()
+    if not s:
+        return []
+    segs = REGION_SEG_RE.findall(s)
+    if not segs:
+        return [s]
+    joined = "".join(segs)
+    rest = s[len(joined):].strip()
+    if rest:
+        segs.append(rest)
+    return segs
+
+
+def panel_kind(item, field):
+    """
+    判定该控件要不要走面板化写入。返回 "date" / "cascade" / ""。
+    判据只取「控件形态 + 字段语义」，不认具体站点（一次登记换 N 站复用）。
+    """
+    if not field.get("panel") and not field.get("readonly"):
+        return ""
+    label = "%s%s" % (item.get("label") or "", item.get("key") or "")
+    val = str(item.get("value") or "")
+    if any(h in label for h in REGION_HINTS) or len(REGION_SEG_RE.findall(val)) >= 2:
+        return "cascade"
+    if item.get("type") == "date" or any(h in label for h in DATE_HINTS):
+        return "date"
+    # 有面板迹象但语义不明：按级联试（可多级点选，退化为单级就是普通下拉）
+    return "cascade"
+
+
+def _panel_items(frame):
+    """采集面板里可见的候选项：[{"k": int, "text": str}]。"""
+    try:
+        got = frame.evaluate(PANEL_ITEMS_JS) or []
+    except Exception:                                        # noqa: BLE001
+        return []
+    return got[:PANEL_MAX_ITEMS]
+
+
+def _panel_click(frame, k):
+    """按采集时打的标记点中某一项（用 JS click，避免弹层被 portal 到 body 后坐标错位）。"""
+    try:
+        el = frame.query_selector('[data-ows-opt="%d"]' % k)
+        if el:
+            el.click()
+            return True
+    except Exception:                                        # noqa: BLE001
+        pass
+    return False
+
 
 
 # --------------------------------------------------------------------------
@@ -173,8 +250,37 @@ def match_strategies(url, fps):
 # 页面扫描：提取表单字段
 # --------------------------------------------------------------------------
 SCAN_JS = r"""
-() => {
+(prefix) => {
   const SKIP = new Set(['hidden', 'submit', 'button', 'image', 'reset']);
+  const PRE = prefix || '';
+
+  // ---- shadow DOM 穿透（2026-10-16 新增）----
+  // 新一代组件库（Web Components）把表单放在 shadow root 里：
+  // document.querySelectorAll 从外部**看不见**它们 ⇒ 扫到 0 个字段。
+  // 这里改成「从 document 出发，遇到 shadowRoot 就钻进去」。
+  const deepAll = (sel, root) => {
+    const out = [];
+    const seen = new Set();
+    const walk = (node) => {
+      let hits = [];
+      try { hits = node.querySelectorAll(sel); } catch (e) { hits = []; }
+      for (const e of hits) { if (!seen.has(e)) { seen.add(e); out.push(e); } }
+      let kids = [];
+      try { kids = node.querySelectorAll('*'); } catch (e) { kids = []; }
+      for (const el of kids) {
+        const sr = el.shadowRoot;
+        if (sr && !seen.has(sr)) { seen.add(sr); walk(sr); }
+      }
+    };
+    walk(root || document);
+    return out;
+  };
+
+  const deepById = (id) => {
+    if (!id) return null;
+    for (const el of deepAll('[id]')) { if (el.id === id) return el; }
+    return null;
+  };
 
   // 区段标题不是字段名（站点策略库 P-008）：
   // 「一、教育经历」这种是分组头，被当成标签会让整组的字段全部映射错。
@@ -196,7 +302,7 @@ SCAN_JS = r"""
   }
 
   // 候选标签节点先算一次，避免每个控件都全页扫一遍
-  const CAND = [...document.querySelectorAll('label,span,div,p,td,th,dt,dd')];
+  const CAND = deepAll('label,span,div,p,td,th,dt,dd');
 
   // 几何邻居法（站点策略库 P-001）：组件库把控件 portal 到 body 之后，
   // DOM 祖先链断裂，「向上找标签」会全部失效 —— 改按**视觉位置**就近取标签。
@@ -227,11 +333,10 @@ SCAN_JS = r"""
       const t = (el.labels[0].innerText || '').trim();
       if (t && !isSectionTitle(el.labels[0], t)) return t;
     }
-    // 2) label[for=id]
+    // 2) label[for=id]（穿透 shadow DOM）
     if (el.id) {
-      const l = document.querySelector('label[for="' + el.id + '"]');
-      if (l && l.innerText) {
-        const t = l.innerText.trim();
+      for (const l of deepAll('label[for="' + el.id + '"]')) {
+        const t = (l.innerText || '').trim();
         if (t && !isSectionTitle(l, t)) return t;
       }
     }
@@ -241,7 +346,7 @@ SCAN_JS = r"""
     const alb = el.getAttribute('aria-labelledby');
     if (alb) {
       const parts = alb.split(/\s+/).map(id => {
-        const n = document.getElementById(id);
+        const n = deepById(id);
         return n ? (n.innerText || '').trim() : '';
       }).filter(Boolean);
       if (parts.length) return parts.join('');
@@ -278,13 +383,23 @@ SCAN_JS = r"""
     return geometricLabel(el);
   }
 
+  // 是否存在自绘面板的迹象（日历 / 级联 / 下拉弹层）——
+  // 这类控件写 value 会假成功，必须走「点开 → 点选」。
+  function panelHint(el) {
+    if (el.getAttribute('aria-haspopup')) return true;
+    if (el.getAttribute('aria-expanded') !== null) return true;
+    if (el.readOnly) return true;
+    if (el.getAttribute('role') === 'combobox') return true;
+    return false;
+  }
+
   const out = [];
   let i = 0;
-  document.querySelectorAll('input,select,textarea').forEach(el => {
+  deepAll('input,select,textarea').forEach(el => {
     const t = (el.type || el.tagName).toLowerCase();
     if (SKIP.has(t)) return;
-    const idx = i++;
-    el.setAttribute('data-ows-idx', String(idx));
+    const idx = PRE + String(i++);
+    el.setAttribute('data-ows-idx', idx);
 
     let label = '';
     let viaGroup = false;
@@ -310,7 +425,8 @@ SCAN_JS = r"""
       visible: visible(el),
       inForm: !!el.closest('form'),
       readonly: !!el.readOnly,
-      viaGroup: viaGroup
+      viaGroup: viaGroup,
+      panel: panelHint(el)
     });
   });
   return out;
@@ -318,9 +434,82 @@ SCAN_JS = r"""
 """
 
 
+# --------------------------------------------------------------------------
+# 自绘面板（日历 / 级联 / 下拉弹层）里的候选项采集
+# --------------------------------------------------------------------------
+# 为什么要单独一套：这类控件**不受我们控制**（不是原生 select），
+# 唯一可靠的办法是「点开它 → 看它渲染出了什么 → 点中那一项」。
+# 采集用「结构特征 + 可见性」双判据，不依赖具体组件库的类名。
+PANEL_ITEMS_JS = r"""
+() => {
+  const SEL = [
+    '[role="option"]', '[role="listbox"] li', '[role="menu"] li',
+    '[class*="picker"] li', '[class*="picker"] td', '[class*="picker"] dd',
+    '[class*="calendar"] td', '[class*="calendar"] li',
+    '[class*="dropdown"] li', '[class*="dropdown"] dd',
+    '[class*="cascader"] li', '[class*="option"]', '[class*="cell"]',
+    '[class*="panel"] li', '[class*="panel"] td', '[class*="panel"] span',
+    '[class*="select"] li', '[class*="popup"] li', 'td[class*="day"]'
+  ];
+  const out = [], seen = new Set();
+  const vis = (el) => !!(el.offsetParent !== null ||
+                        (el.getClientRects && el.getClientRects().length));
+  const panelish = (el) => {
+    let n = el, d = 0;
+    while (n && d < 6) {
+      const a = (n.getAttribute && (n.getAttribute('class') || '')) || '';
+      const r = n.getAttribute && (n.getAttribute('role') || '');
+      if (/picker|calendar|dropdown|cascader|popup|select|panel|menu|option/i.test(a)
+          || r === 'listbox' || r === 'menu' || r === 'dialog') return true;
+      n = n.parentElement; d++;
+    }
+    return false;
+  };
+  for (const sel of SEL) {
+    for (const el of document.querySelectorAll(sel)) {
+      if (seen.has(el) || !vis(el)) continue;
+      if (el.querySelector('input,select,textarea')) continue;
+      const txt = (el.innerText || el.textContent || '').trim();
+      if (!txt || txt.length > 24) continue;
+      if (!panelish(el)) continue;
+      seen.add(el);
+      out.push({ k: out.length, text: txt });
+      el.setAttribute('data-ows-opt', String(out.length - 1));
+    }
+    if (out.length > 400) break;
+  }
+  return out;
+}
+"""
+
+
 def scan_page(page):
-    """扫描页面表单字段。"""
-    return page.evaluate(SCAN_JS)
+    """
+    扫描页面表单字段。**穿透 iframe 与 shadow DOM**（2026-10-16）。
+
+    返回 (fields, frames_by_idx)：
+      · fields       每个控件一个 dict，`idx` 是**全局唯一字符串**
+      · frames_by_idx  idx → 该控件所在的 frame（供写入时用同一个 frame 定位）
+    主文档前缀为空；第 i 个子 frame 前缀 `f<i>_`，保证 idx 不撞车。
+    """
+    fields, frames_by_idx = [], {}
+    scopes = [(page.main_frame, "")]
+    for i, fr in enumerate(page.frames):
+        if fr is page.main_frame:
+            continue
+        scopes.append((fr, "f%d_" % i))
+
+    for fr, pre in scopes:
+        try:
+            got = fr.evaluate(SCAN_JS, pre)
+        except Exception:                                    # noqa: BLE001
+            # 跨域 iframe / 已销毁的 frame：跳过，不因此整体失败
+            continue
+        for f in got or []:
+            frames_by_idx[f["idx"]] = fr
+            f["frame"] = pre or "main"
+            fields.append(f)
+    return fields, frames_by_idx
 
 
 def is_captcha(field):
@@ -426,17 +615,20 @@ def _norm_date(v):
     return None, False
 
 
-def apply_plan(page, plan, fields_by_idx, deadline=None):
+def apply_plan(page, plan, fields_by_idx, frames_by_idx=None, deadline=None):
     """
-    执行填写。返回 {已填, 失败, 跳过, 日期补全, 超时中止}。
+    执行填写。返回 {已填, 失败, 跳过, 日期补全, 超时中止, 假成功, 面板写入}。
     **本函数不触碰任何提交类按钮。**
 
     `deadline` = 绝对时间戳（time.time() 口径）。到点即停手 —— 已完成的部分
     照常保留在页面上，未完成的不再往下试，交给「可复制清单页」。
+    `frames_by_idx`：idx → 该控件所在 frame（iframe / shadow DOM 场景必需）。
     """
     filled, failed, skipped, adjusted = 0, [], [], []
     timed_out = False
     fake = 0                     # 假成功计数（写入返回成功、回读为空/值=标签）
+    paneled = 0                  # 靠面板点选才写进去的（自绘日历 / 级联）
+    frames_by_idx = frames_by_idx or {}
 
     for item in plan:
         if deadline is not None and time.time() > deadline:
@@ -446,13 +638,14 @@ def apply_plan(page, plan, fields_by_idx, deadline=None):
             skipped.append({"label": item["label"], "原因": "档案缺项"})
             continue
 
-        sel = '[data-ows-idx="%d"]' % item["idx"]
+        sel = '[data-ows-idx="%s"]' % item["idx"]
         f = fields_by_idx.get(item["idx"], {})
+        frame = frames_by_idx.get(item["idx"]) or page.main_frame
         try:
             if item["type"] in ("radio", "checkbox"):
-                ok = _fill_choice(page, sel, item, f)
+                ok = _fill_choice(frame, sel, item, f)
             elif item["type"] == "select" or f.get("tag") == "select":
-                ok = _fill_select(page, item, f)
+                ok = _fill_select(frame, item, f)
             else:
                 v = item["value"]
                 if item["type"] == "date":
@@ -464,14 +657,25 @@ def apply_plan(page, plan, fields_by_idx, deadline=None):
                     v = nd
                     if completed:
                         adjusted.append({"label": item["label"], "说明": "按月补全为 -01，请核对"})
-                ok = _force_fill(page, sel, v)
+                ok = _force_fill(frame, sel, v)
+
+            # ---- 面板化兜底：只读框 / 自绘日历 / 级联选择器 ----
+            # `fill` 与「JS 直写 value」对这类控件都会假成功（组件把值渲染在
+            # 自己的面板里，DOM 的 value 根本没动）。必须点开面板、点中那一项。
+            if (not ok or not _read_back(frame, item["idx"], item["type"])) \
+                    and item["type"] not in ("radio", "checkbox", "select"):
+                kind = panel_kind(item, f)
+                if kind and _panel_fill(frame, sel, item, kind, deadline):
+                    filled += 1
+                    paneled += 1
+                    continue
 
             if not ok:
                 failed.append({"label": item["label"], "原因": "选项未匹配 / 控件不可写"})
                 continue
 
             # ---- 回读验证：写入返回 ≠ 真的写进去了 ----
-            got = _read_back(page, item["idx"], item["type"])
+            got = _read_back(frame, item["idx"], item["type"])
             if not got:
                 fake += 1
                 failed.append({"label": item["label"],
@@ -486,19 +690,20 @@ def apply_plan(page, plan, fields_by_idx, deadline=None):
                 continue
             filled += 1
         except Exception as e:
-            failed.append({"label": item["label"], "原因": str(e).split("\n")[0][:80]})
+            failed.append({"label": item["label"], "原因": friendly_error(e)})
     return {"已填": filled, "失败": failed, "跳过": skipped,
-            "假成功": fake, "超时中止": timed_out, "日期补全": adjusted}
+            "假成功": fake, "超时中止": timed_out, "日期补全": adjusted,
+            "面板写入": paneled}
 
 
-def _fill_choice(page, sel, item, field):
+def _fill_choice(frame, sel, item, field):
     """单选/复选：按选项文本匹配（含值域别名）。"""
     val = str(item["value"]).strip()
     name = field.get("name") or ""
     if name:
-        opts = page.query_selector_all('input[name="%s"]' % name)
+        opts = frame.query_selector_all('input[name="%s"]' % name)
     else:
-        opts = [page.query_selector(sel)]
+        opts = [frame.query_selector(sel)]
 
     pairs = []                     # [(选项文字, 元素)]
     for o in opts:
@@ -507,7 +712,7 @@ def _fill_choice(page, sel, item, field):
         oid = o.get_attribute("id") or ""
         lab = ""
         if oid:
-            l = page.query_selector('label[for="%s"]' % oid)
+            l = frame.query_selector('label[for="%s"]' % oid)
             if l:
                 lab = (l.inner_text() or "").strip()
         if not lab:
@@ -529,52 +734,52 @@ def _fill_choice(page, sel, item, field):
     return False
 
 
-def _fill_select(page, item, field):
+def _fill_select(frame, item, field):
     """下拉框：精确 → 值 → 值域别名 → 模糊。"""
     val = str(item["value"]).strip()
-    sel = '[data-ows-idx="%d"]' % item["idx"]
+    sel = '[data-ows-idx="%s"]' % item["idx"]
     try:
-        page.select_option(sel, label=val)
+        frame.select_option(sel, label=val)
         return True
-    except Exception:
+    except Exception:                                        # noqa: BLE001
         pass
     try:
-        page.select_option(sel, value=val)
+        frame.select_option(sel, value=val)
         return True
-    except Exception:
+    except Exception:                                        # noqa: BLE001
         pass
 
     opts = field.get("options") or []
     hit = core.match_option(val, opts)
     if hit:
         try:
-            page.select_option(sel, label=hit)
+            frame.select_option(sel, label=hit)
             return True
-        except Exception:
+        except Exception:                                    # noqa: BLE001
             pass
     for o in opts:
         if val and (val in o or o in val):
             try:
-                page.select_option(sel, label=o)
+                frame.select_option(sel, label=o)
                 return True
-            except Exception:
+            except Exception:                                # noqa: BLE001
                 continue
     return False
 
 
-def _force_fill(page, sel, value):
+def _force_fill(frame, sel, value):
     """
     写入：先常规 fill；失败（只读框、自绘控件）再走 JS 直写并派发 input/change。
     站点策略库 P-003/P-006：只读日历/级联用 page.fill 会直接失败或超时。
     返回值：True = 已写入（**读回验证在调用方做**）。
     """
     try:
-        page.fill(sel, value)
+        frame.fill(sel, value)
         return True
-    except Exception:
+    except Exception:                                        # noqa: BLE001
         pass
     try:
-        page.eval_on_selector(sel, """(el, v) => {
+        frame.eval_on_selector(sel, """(el, v) => {
             el.removeAttribute('readonly');
             el.focus();
             el.value = v;
@@ -582,23 +787,197 @@ def _force_fill(page, sel, value):
             el.dispatchEvent(new Event('change', {bubbles: true}));
         }""", value)
         return True
-    except Exception:
+    except Exception:                                        # noqa: BLE001
         return False
 
 
-def _read_back(page, idx, kind):
+# --------------------------------------------------------------------------
+# 面板化写入：点开 → 点选（P0-10 补全）
+# --------------------------------------------------------------------------
+def _panel_pick(frame, wanted_list):
+    """
+    在**当前打开的面板**里找并点中一项。
+    `wanted_list` 是候选写法，**按顺序**从严到宽试（如 ['2026-06-30','2026/06/30','30']）。
+    """
+    items = _panel_items(frame)
+    if not items:
+        return False
+    # ① 归一后精确相等（最严，先试）
+    for want in wanted_list:
+        nv = core.norm(want)
+        if not nv:
+            continue
+        for it in items:
+            if core.norm(it["text"]) == nv:
+                return _panel_click(frame, it["k"])
+    # ② 值域别名 / 互为包含
+    texts = [it["text"] for it in items]
+    for want in wanted_list:
+        hit = core.match_option(want, texts)
+        if hit:
+            for it in items:
+                if it["text"] == hit:
+                    return _panel_click(frame, it["k"])
+    return False
+
+
+def _date_candidates(val):
+    """日期面板的候选写法：整串 → 斜杠写法 → 只留「日」。"""
+    s = str(val or "").strip()
+    out = [s]
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", s):
+        out.append(s.replace("-", "/"))
+        out.append(s.replace("-", ""))
+        out.append(s.split("-")[-1])            # 日历格子里写的是「30」
+    elif re.match(r"^\d{4}-\d{2}$", s):
+        out.append(s.replace("-", "/"))
+    return [x for x in out if x]
+
+
+def _panel_fill(frame, sel, item, kind, deadline=None):
+    """
+    面板化写入。返回 True 表示**面板里点选成功**（回读仍由调用方复核）。
+
+    为什么不做「只在某个站点上写死选择器」
+    ------------------------------------
+    面板结构是**组件库**决定的，不是站点决定的。这里只按「可见 + 落在弹层里 +
+    文本够短」三条通用判据采集候选项，再靠文本匹配点中 —— 换站点照样能用。
+    """
+    def alive():
+        return deadline is None or time.time() <= deadline
+
+    if not alive():
+        return False
+    val = str(item.get("value") or "")
+    el = None
+    try:
+        el = frame.query_selector(sel)
+    except Exception:                                        # noqa: BLE001
+        return False
+    if not el:
+        return False
+    try:
+        el.scroll_into_view_if_needed(timeout=3000)
+    except Exception:                                        # noqa: BLE001
+        pass
+
+    # 日期：先试「聚焦后键盘直输」—— 不少组件库认键盘，比点日历稳
+    if kind == "date":
+        try:
+            el.click()
+            frame.wait_for_timeout(PANEL_SETTLE_MS)
+            frame.fill(sel, val)
+        except Exception:                                    # noqa: BLE001
+            pass
+        if _read_back(frame, item["idx"], item["type"]):
+            return True
+
+    # 点开面板
+    try:
+        el.click()
+    except Exception:                                        # noqa: BLE001
+        return False
+    frame.wait_for_timeout(PANEL_SETTLE_MS)
+
+    if kind == "date":
+        targets = [_date_candidates(val)]
+    else:
+        segs = split_region(val)
+        targets = [[seg] for seg in segs[:PANEL_MAX_LEVELS]]
+        if not targets:
+            return False
+
+    hit_any = False
+    for wanted in targets:
+        if not alive():
+            break
+        if _panel_pick(frame, wanted):
+            hit_any = True
+            frame.wait_for_timeout(PANEL_SETTLE_MS)
+        else:
+            # 该级没命中：日期再退一步试「只按日」；级联则到此为止（不猜下一级）
+            if kind == "date":
+                tail = val.split("-")[-1] if "-" in val else val
+                if tail and tail not in wanted and _panel_pick(frame, [tail]):
+                    hit_any = True
+                    frame.wait_for_timeout(PANEL_SETTLE_MS)
+            else:
+                break
+    return hit_any
+
+
+def _read_back(frame, idx, kind):
     """
     回读控件当前值。**这是「已填」的唯一判据** ——
     以前 page.fill 返回就算成功，自绘控件把值丢掉也照样记「已填」（假成功）。
     """
-    sel = '[data-ows-idx="%d"]' % idx
+    sel = '[data-ows-idx="%s"]' % idx
     try:
         if kind in ("radio", "checkbox"):
-            return "1" if page.eval_on_selector(sel, "el => !!el.checked") else ""
-        v = page.eval_on_selector(sel, "el => (el.value == null ? '' : String(el.value))")
+            return "1" if frame.eval_on_selector(sel, "el => !!el.checked") else ""
+        v = frame.eval_on_selector(sel, "el => (el.value == null ? '' : String(el.value))")
         return (v or "").strip()
-    except Exception:
+    except Exception:                                        # noqa: BLE001
         return ""
+
+
+# --------------------------------------------------------------------------
+# 页面就绪等待（Backlog-7）
+# --------------------------------------------------------------------------
+# 固定 `wait_for_timeout(3000)` 两头不讨好：慢站没加载完就开始扫（扫到 0 个字段），
+# 快站白等 3 秒 ×N 站，把 300 秒预算浪费在空等上。
+# ⇒ 改成「等控件出现（有上限）＋ 短促沉降」，预算紧张时自动缩短。
+SETTLE_MS = 600
+
+
+def wait_ready(page, timeout_ms, settle_ms=SETTLE_MS):
+    """
+    等页面出现可填控件。返回 (是否等到, 说明)。
+    等不到不报错 —— 交给后面的「扫到 0 个字段」停手逻辑去说明原因。
+    """
+    try:
+        page.wait_for_selector("input,select,textarea",
+                               state="attached", timeout=max(1000, timeout_ms))
+        waited = "已等到输入控件"
+    except Exception:                                        # noqa: BLE001
+        waited = "等待超时（页面可能还没加载完 / 内容在 iframe 里）"
+    try:
+        page.wait_for_timeout(settle_ms)
+    except Exception:                                        # noqa: BLE001
+        pass
+    return ("超时" not in waited), waited
+
+
+# --------------------------------------------------------------------------
+# 错误信息中文友好（Backlog-8 · P1-15）
+# --------------------------------------------------------------------------
+ERROR_HINTS = (
+    ("Timeout", "等待超时（页面太慢或元素不存在）"),
+    ("timeout", "等待超时（页面太慢或元素不存在）"),
+    ("not visible", "控件不可见（可能被折叠/隐藏）"),
+    ("intercepts pointer events", "控件被浮层挡住（先关掉弹窗/遮罩）"),
+    ("strict mode violation", "页面上有多个同名控件，无法确定填哪一个"),
+    ("Element is not attached", "控件已被页面刷新掉（表单重绘）"),
+    ("Target closed", "浏览器页面被关闭"),
+    ("net::ERR", "页面打不开（网络或地址问题）"),
+    ("Execution context was destroyed", "页面在填写途中跳转/重载"),
+)
+
+
+def friendly_error(exc):
+    """把 playwright 的英文异常翻译成「人话 + 下一步」。
+
+    译文在**前**（让人看懂），原始信息在**后**（截断保留）：不能把诊断线索吃掉 ——
+    报问题时「30000ms exceeded」和「15000ms exceeded」是两条不同的线索，
+    只回一句「等待超时」等于把线索丢了。
+    """
+    raw = str(exc).split("\n")[0].strip()
+    if not raw:
+        return "未知错误"
+    for key, cn in ERROR_HINTS:
+        if key.lower() in raw.lower():
+            return "%s（原始信息：%s）" % (cn, raw[:80])
+    return raw[:80]
 
 
 # 收尾保险丝。个别环境下驱动会卡在 browser.close()／驱动退出上，
@@ -639,14 +1018,22 @@ def _write_manual_html(args, fields, profile):
             return ""
         md = sheet_html.md_from_profile(args.profile, labels, args.rules)
         ready, miss, meta = sheet_html.parse_md(md)
-        out = args.html
-        os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
-        with open(out, "w", encoding="utf-8", newline="") as fh:
-            fh.write(sheet_html.render_html(ready, miss, meta))
-        return out
+        # 统一 safe_write：显式路径 ⇒ 允许覆盖（用户自己点的名）
+        return core.safe_write(args.html,
+                               sheet_html.render_html(ready, miss, meta),
+                               overwrite=True)
     except Exception as exc:                              # noqa: BLE001
-        print("   （可复制页没能生成：%s）" % str(exc).split("\n")[0][:60])
+        print("   （可复制页没能生成：%s）" % friendly_error(exc))
         return ""
+
+
+def exit_code(report):
+    """收尾退出码。**提前停手 ⇒ 5**（fail-visible），正常走完 ⇒ 0。
+
+    抽成纯函数是为了能被自测直接断言 —— 原先只有一行内联表达式，
+    测试只能去匹配源码字符串，改个格式就假红。
+    """
+    return 5 if report.get("停止原因") else 0
 
 
 def run(args):
@@ -717,17 +1104,22 @@ def run(args):
         if cdp_url and site_of(args.url) and site_of(args.url) in (page.url or ""):
             # 已经在目标页上了：**不要再 goto** —— 会把你已填/已登录的状态刷掉
             print("[1/5] 复用当前页签：%s" % (page.url or "")[:100])
+            wait_ready(page, min(step_to, 3000))
         else:
             print("[1/5] 打开页面：%s" % args.url)
             page.goto(args.url, wait_until="domcontentloaded")
-        page.wait_for_timeout(3000)
+            # 等「真的出现输入控件」，不再固定空等 3 秒（Backlog-7）
+            hit, why = wait_ready(page, args.wait)
+            print("      %s" % why)
         report["接管模式"] = bool(cdp_url)
 
         print("[2/5] 扫描表单字段")
-        fields = scan_page(page)
+        fields, frames_by_idx = scan_page(page)
         report["页面标题"] = page.title()
         report["字段总数"] = len(fields)
-        print("      发现 %d 个输入控件" % len(fields))
+        iframes = len({f["frame"] for f in fields if f["frame"] != "main"})
+        print("      发现 %d 个输入控件%s"
+              % (len(fields), "（含 %d 个 iframe）" % iframes if iframes else ""))
 
         fields_by_idx = {f["idx"]: f for f in fields}
         labels = [f["label"] for f in fields if f.get("label")]
@@ -798,9 +1190,13 @@ def run(args):
                    "假成功": 0, "超时中止": True, "原因": stop_reason}
         else:
             print("[4/5] 写入表单（不提交）")
-            res = apply_plan(page, plan, fields_by_idx, deadline=deadline)
+            res = apply_plan(page, plan, fields_by_idx,
+                             frames_by_idx=frames_by_idx, deadline=deadline)
             print("      已填 %d ／ 失败 %d ／ 跳过 %d"
                   % (res["已填"], len(res["失败"]), len(res["跳过"])))
+            if res.get("面板写入"):
+                print("      其中 %d 个是「自绘控件」——靠点开面板逐级点选才填进去的"
+                      % res["面板写入"])
             if res.get("假成功"):
                 print("      ⚠️ 其中 %d 个是「写进去了又被丢掉」（回读才发现）——"
                       " 已从「已填」里剔除，请手工确认这几项：" % res["假成功"])
@@ -827,7 +1223,9 @@ def run(args):
                 print("        → 命中策略 [%s] %s" % (s.get("id"), (s.get("动作") or "")[:56]))
 
         if args.screenshot:
-            os.makedirs(os.path.dirname(os.path.abspath(args.screenshot)), exist_ok=True)
+            # 截图由 playwright 直接写（二进制），这里只保证目录存在。
+            # 显式路径＝用户自己的选择，不做基准限制（见 core.safe_write 的说明）。
+            core.ensure_dir(args.screenshot)
             page.screenshot(path=args.screenshot, full_page=True)
             print("[5/5] 已截图：%s" % args.screenshot)
         else:
@@ -836,17 +1234,17 @@ def run(args):
         # 报告**先落盘**：收尾保险丝一旦触发会直接结束进程，任何产物都必须
         # 在武装它之前写完，否则会丢（只含键名与状态，不含真值）。
         if args.out:
-            os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
-            # newline="" 关掉平台换行转换：Windows 上会写成 CRLF，与仓库
-            # .gitattributes 的 eol=lf 约定冲突。统一出 LF。
-            with open(args.out, "w", encoding="utf-8", newline="") as f:
-                json.dump(report, f, ensure_ascii=False, indent=2)
-            print("报告已写入：%s" % args.out)
+            # 走统一 safe_write：同名不覆盖（改存带时间戳）+ 原子替换。
+            # `--out` 是用户显式点名的目标 ⇒ 视为授权覆盖。
+            wrote = core.safe_write(
+                args.out, json.dumps(report, ensure_ascii=False, indent=2),
+                overwrite=True, root=os.path.dirname(os.path.abspath(args.out)))
+            print("报告已写入：%s" % wrote)
 
         # —— 收尾。先上保险丝再关浏览器。
         # 退出码必须**在武装保险丝之前**算好：保险丝写死 rc=0 会把
         # 「提前停手（应=5）」污染成「成功」。
-        final_rc = 5 if report.get("停止原因") else 0
+        final_rc = exit_code(report)
         release = threading.Event()
         arm_close_guard(release, rc=final_rc)
         if cdp_url:
@@ -877,7 +1275,7 @@ def run(args):
             print("   想让脚本停手时直接生成那张页：加 --html 填写清单.html")
         print("")
     print("⚠️ 已停在提交前。**附件、志愿顺序、最终提交由你本人完成。**")
-    return 5 if reason else 0
+    return exit_code(report)
 
 
 def main():
@@ -893,6 +1291,8 @@ def main():
                     help="浏览器代理（Chromium 不读环境变量，必须显式传）")
     ap.add_argument("--headed", action="store_true", help="显示浏览器窗口（默认无头）")
     ap.add_argument("--timeout", type=int, default=45000, help="单步超时毫秒")
+    ap.add_argument("--wait", type=int, default=8000,
+                    help="等「出现输入控件」的上限毫秒（默认 8000；不再固定空等 3 秒）")
     ap.add_argument("--screenshot", help="截图输出路径")
     ap.add_argument("--out", help="报告 JSON 输出路径")
     ap.add_argument("--dry-run", action="store_true", help="只映射不写入")
@@ -933,10 +1333,10 @@ def selftest():
     index = core.build_index(rules)
 
     def mk(idx, label, typ="text", options=None, visible=True, inform=True,
-           readonly=False, name="n%d" % 0):
+           readonly=False, name="n%d" % 0, panel=False):
         return {"idx": idx, "label": label, "type": typ, "name": name, "id": "",
                 "options": options, "visible": visible, "inForm": inform,
-                "readonly": readonly}
+                "readonly": readonly, "panel": panel, "frame": "main"}
 
     # ---- 泛化短标签：拒写而不是猜 ----
     f = [mk(0, "日期")]
@@ -986,6 +1386,38 @@ def selftest():
     # ---- 站点标识 ----
     check("⑪ 站点取主机名且去 www",
           site_of("https://www.51job.com/a/b") == "51job.com", site_of("https://www.51job.com/a"))
+
+    # ---- 面板化写入的纯函数（P0-10）----
+    check("⑫ 地区串逐级切分",
+          split_region("山东省济南市历下区") == ["山东省", "济南市", "历下区"],
+          split_region("山东省济南市历下区"))
+    check("⑬ 直辖市两级切分",
+          split_region("北京市海淀区") == ["北京市", "海淀区"],
+          split_region("北京市海淀区"))
+    check("⑭ 自治区不被切碎",
+          split_region("内蒙古自治区呼和浩特市")[0] == "内蒙古自治区",
+          split_region("内蒙古自治区呼和浩特市"))
+    check("⑮ 切不动时整体作一段",
+          split_region("东城区") == ["东城区"], split_region("东城区"))
+    check("⑯ 只读的籍贯框判为级联", panel_kind(
+        {"label": "籍贯", "key": "籍贯", "type": "text", "value": "山东省济南市历下区"},
+        mk(0, "籍贯", readonly=True, panel=True)) == "cascade")
+    check("⑰ 日期框判为日期", panel_kind(
+        {"label": "出生日期", "key": "出生日期", "type": "date", "value": "2000-01-01"},
+        mk(0, "出生日期", "date", readonly=True, panel=True)) == "date")
+    check("⑱ 普通文本框不走面板", panel_kind(
+        {"label": "姓名", "key": "姓名", "type": "text", "value": "张某"},
+        mk(0, "姓名")) == "")
+    check("⑲ 日期候选取整串与「日」",
+          _date_candidates("2026-06-30")[:1] == ["2026-06-30"]
+          and "30" in _date_candidates("2026-06-30"))
+
+    # ---- 错误信息中文化（P1-15）----
+    check("⑳ 超时异常被译成人话",
+          "超时" in friendly_error(Exception("Timeout 45000ms exceeded")),
+          friendly_error(Exception("Timeout 45000ms exceeded")))
+    check("㉑ 未知异常不吞掉原文",
+          friendly_error(Exception("SomeWeirdError: abc")) .startswith("SomeWeirdError"))
 
     print("\n自测结果：%d 通过 / %d 失败" % (ok[0], bad[0]))
     return 0 if bad[0] == 0 else 1

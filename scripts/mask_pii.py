@@ -41,11 +41,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import core  # noqa: E402
 
 # PII 白名单：**能唯一定位到某个人**的字段。白名单以外一律不动。
+#
+# ⚠️ 这里的键名必须**逐字**取自 `assets/字段规则_通用.json`。
+# 2026-10-15 示范档案改键名时（户籍所在地 → 户籍），这一行没跟着改，
+# 结果是**脱敏静默失效**：`value_of(profile, "户籍所在地")` 永远取到空，
+# 户籍照原样留在文本里发出去，而脚本报告「脱敏 N 处」一切正常。
+# ⇒ 现在由 selftest 里的「白名单 ⊆ 词表键」断言兜住（一条执行点，不是文档承诺）。
 PII_KEYS = [
     "姓名", "英文名",
     "身份证号", "证件类型",
     "手机号", "备用电话", "电子邮箱",
-    "通讯地址", "邮政编码", "户籍所在地", "籍贯",
+    "通讯地址", "邮政编码", "户籍", "籍贯",
     "出生日期",
     "紧急联系人姓名", "紧急联系人电话",
 ]
@@ -56,7 +62,7 @@ PLACEHOLDER = {
     "身份证号": "【身份证号】", "证件类型": "【证件类型】",
     "手机号": "【手机号】", "备用电话": "【备用电话】", "电子邮箱": "【电子邮箱】",
     "通讯地址": "【通讯地址】", "邮政编码": "【邮政编码】",
-    "户籍所在地": "【户籍所在地】", "籍贯": "【籍贯】",
+    "户籍": "【户籍】", "籍贯": "【籍贯】",
     "出生日期": "【出生日期】",
     "紧急联系人姓名": "【紧急联系人姓名】", "紧急联系人电话": "【紧急联系人电话】",
 }
@@ -145,10 +151,22 @@ def selftest():
     mapping = build_map(profile)
 
     print("【自测】PII 白名单命中字段数：%d" % len(mapping))
-    assert "姓名" in [k for k in profile if profile.get(k) == "示例考生"] or True
+
+    # ---- 白名单必须落在词表内（2026-10-16 新增的执行点）----
+    # 键名一旦与词表脱钩，脱敏就**静默失效**：取到空值 → 真值原样发出去，
+    # 而脚本照报「脱敏 N 处」。这条断言把那种失效钉死在 CI 上。
+    rule_keys = {f["键"] for f in core.load_rules()}
+    dangling = [k for k in PII_KEYS if k not in rule_keys]
+    assert not dangling, "PII 白名单里有词表不认识的键（脱敏会静默失效）：%s" % dangling
+    print("  白名单 %d 个键全部在词表内 ✓" % len(PII_KEYS))
+
+    # 示例档案里确实有值能被映射上（否则下面的替换断言会变成空转）
+    assert mapping, "示例档案没有命中任何 PII 字段，自测无法验证脱敏"
+    assert "示例考生" in mapping, "示例档案里的姓名未被白名单覆盖"
 
     sample = ("我叫示例考生，手机号 13800000000，邮箱 example@example.com，"
-              "身份证 110101199901011234。我是中共党员，性别男。")
+              "身份证 110101199901011234。户籍 山东省济南市历下区。"
+              "我是中共党员，性别男。")
 
     hits = scan(sample, mapping)
     print("  扫描命中：%s" % ("、".join("%s×%d" % (p, c) for p, c in hits)))
@@ -160,6 +178,9 @@ def selftest():
     assert "example@example.com" not in masked, "邮箱未脱敏"
     assert "110101199901011234" not in masked, "身份证未脱敏"
     assert "示例考生" not in masked, "姓名未脱敏"
+    # 回归钉：2026-10-15 键名从「户籍所在地」改成「户籍」后，白名单没跟着改，
+    # 户籍真值被原样带出去。这条断言让同类失效不可能再悄悄发生。
+    assert "山东省济南市历下区" not in masked, "户籍未脱敏（白名单键名与词表脱钩）"
     # 反证：非 PII 必须保留
     assert "中共党员" in masked, "政治面貌不应被脱敏"
     assert "男" in masked, "性别不应被脱敏"
@@ -171,8 +192,14 @@ def selftest():
     back, r = restore(masked, mapping)
     print("  还原次数：%d" % r)
     assert "13800000000" in back and "中共党员" in back, "还原失败"
+    assert "山东省济南市历下区" in back, "户籍未还原（说明它一开始就没被替换）"
 
-    print("【自测通过】脱敏 / 二验 / 还原 三项全部正确")
+    # 占位符表与白名单必须一一对应（多一个少一个都是配置漂移）
+    assert set(PLACEHOLDER) == set(PII_KEYS), (
+        "PLACEHOLDER 与 PII_KEYS 不一致：%s"
+        % (set(PLACEHOLDER) ^ set(PII_KEYS)))
+
+    print("【自测通过】脱敏 / 二验 / 还原 / 白名单对齐 全部正确")
     return 0
 
 

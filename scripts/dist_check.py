@@ -120,6 +120,31 @@ def is_placeholder_email(v):
     dom = v.rsplit("@", 1)[-1].strip().lower()
     return any(dom == d or dom.endswith("." + d) for d in PLACEHOLDER_DOMAINS)
 
+
+def public_addresses():
+    """
+    **设计上就是要公开**的地址 —— 目前只有一处：零账号反馈邮箱
+    （`assets/反馈渠道.json` 的「反馈邮箱」）。
+
+    为什么必须单列一类
+    ------------------
+    判据 3 的立场是「非占位符的邮箱一律当泄露」（fail-closed），这条立场是对的：
+    绝大多数邮箱出现在仓库里都意味着事故。但「项目专用反馈邮箱」是**反例**——
+    它出现在这里不是泄露，而是**功能本身**（考生靠它把反馈寄出来）。
+    把功能当事故拦下，结果是作者被迫关掉功能来让扫描器变绿 —— 那是
+    「绿灯靠拆功能换来的」，比红灯更坏。
+
+    边界：只认这一个键、只认这一个文件。别处出现同一个地址**仍会照报**。
+    """
+    path = os.path.join(core.PROJECT_ROOT, "assets", "反馈渠道.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return set()
+    addr = str(d.get("反馈邮箱") or "").strip()
+    return {addr} if addr else set()
+
 # ── 判据 4：人属性 ────────────────────────────────────────────
 RULE_FILE_RE = re.compile(r"^(assets|sites)/")
 PERSON_MARKERS = ("本人", "我的", "我叫", "我于", "我毕", "我毕业")
@@ -288,6 +313,7 @@ def check(profile=None, verbose=True):
     # 判据 2（需要真档案做对照）
     values = profile_values(profile) if profile else {}
     fake = documented_fake_values()
+    public = public_addresses()
 
     for rel in files:
         full = os.path.join(core.PROJECT_ROOT, rel)
@@ -320,7 +346,8 @@ def check(profile=None, verbose=True):
                     fails.append(("结构模式", rel, i, "非占位符的 11 位手机号"))
                     break
             for m in EMAIL_RE.finditer(line):
-                if m.group(0) not in fake and not is_placeholder_email(m.group(0)):
+                if (m.group(0) not in fake and m.group(0) not in public
+                        and not is_placeholder_email(m.group(0))):
                     fails.append(("结构模式", rel, i, "非占位符的邮箱"))
                     break
 
@@ -343,6 +370,9 @@ def check(profile=None, verbose=True):
               % (len(files), len(files) - len(skipped_bin) - len(unreadable),
                  len(skipped_bin), len(unreadable)))
         print("官方假值白名单：%d 个（取自 fixtures/档案_示例.json）" % len(fake))
+        if public:
+            print("公开用途地址：%d 个（取自 assets/反馈渠道.json 的「反馈邮箱」）"
+                  % len(public))
         if profile:
             print("对照档案字段值：%d 个（只用于比对，不打印）" % len(values))
         print()
@@ -445,6 +475,14 @@ def selftest():
               and read_lines(os.path.join(core.PROJECT_ROOT, p)) is None]
     assert not unread, "仍有 %d 个入库文件读不到：%s" % (len(unread), unread[:3])
     print("【自测 8】入库文件全覆盖：%d 个，无一读不到 ✓" % len(files))
+
+    # 公开用途地址（2026-10-16 新增）：反馈邮箱是**功能**，不是泄露面。
+    # 反证：白名单只认 assets/反馈渠道.json 的那一个键 —— 换个地址照样该报。
+    pub = public_addresses()
+    listed = [p for p in files if p == "assets/反馈渠道.json"]
+    assert listed, "assets/反馈渠道.json 未入库（白名单的依据不在扫描范围内）"
+    assert len(pub) <= 1, "公开用途地址只该有一个来源"
+    print("【自测 9】公开用途地址白名单：%d 个（来源 %s）✓" % (len(pub), listed[0]))
 
     import shutil
     shutil.rmtree(tmp, ignore_errors=True)

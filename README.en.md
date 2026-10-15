@@ -50,7 +50,7 @@ python scripts/wangshen.py guide            # print the recommended path
 profile.json (local only)
       │
       ├─→ check ─────→ which fields are missing
-      ├─→ mapping ───→ page label → profile key (165 fields / 643 labels)
+      ├─→ mapping ───→ page label → profile key (187 fields / 731 labels)
       ├─→ fill ←──────┘  values go straight into the browser
       │      └─ can't open? → generate checklist → you paste manually
       └─→ mask ──────→ redact PII before sending text to an AI
@@ -68,13 +68,25 @@ answers) don't need real values. **The two can be cleanly separated.**
   masking them just makes the text useless
 - Post-mask verification re-scans for leftovers; refuses to output if any remain
 - Mapping tables live in memory only — never written to disk or logs
+- **Artifacts are never overwritten by default**: a name collision is saved under
+  a new timestamped name instead (`--overwrite` to opt in). Writes are atomic
+- **A zero-truth gate runs before any write**: feedback packages and the issue
+  registry are **aborted** if they contain a phone number, ID, or local path
+  (not warned, not redacted-and-allowed)
+
+See [SECURITY.md](SECURITY.md) — including the **private** channel for reporting
+security defects (please don't open a public issue for those).
 
 ## Testing
 
 ```bash
-python scripts/wangshen.py selftest
-python -m unittest discover -s tests
+python scripts/wangshen.py selftest              # every script's built-in selftest
+python -m unittest discover -s tests             # 139 unit tests, stdlib only
+python scripts/dist_check.py                     # pre-release leak scan
+python scripts/gen_issue_template.py --check     # issue template / option sets in sync
 ```
+
+These are the same commands CI runs (Ubuntu, three Python versions, plus Windows).
 
 ## Disclaimer
 
