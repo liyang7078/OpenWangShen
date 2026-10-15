@@ -21,11 +21,17 @@
 3. **清单** —— 打不开页面时，生成一份填写清单，你照着粘
 4. **脱敏** —— 需要 AI 帮忙写开放题时，先把身份信息替换掉
 
-**它不是什么：**
+**它是什么、不是什么：**
 
+- ✅ **独立功能**。它不代你注册、不代你登录，也不要你的账号
+- ✅ **只填**。它在你**已经打开的那个表单页**上工作，不管别的
 - ❌ 不是海投机器。它不替你选岗、不替你投递、不替你提交
 - ❌ 不绕过登录、不索取账号密码、不代过人机验证
 - ❌ 不联网上传你的任何信息
+
+> ⚠️ **用之前请先完成注册和登录，进到「填写简历信息」那个页面再运行。**
+> 停在登录页、首页、岗位列表页上用，它只会告诉你「发现 0 个输入控件」——
+> 因为那时候**页面上确实还没有表单**。
 
 ---
 
@@ -63,6 +69,15 @@
 
 ## 快速开始
 
+> ⚠️ **本工具是独立功能，用之前有三件事必须先做：**
+>
+> 1. **自己完成注册** —— 它不代你注册，也不需要你的账号
+> 2. **自己完成登录** —— 它不绕登录，也不帮你过人机验证
+> 3. **进到「填写简历信息」那个页面之后再运行** —— 它扫描的是**当前打开页面**上的表单
+>
+> 停在登录页 / 首页 / 岗位列表页上跑，它只会打印「发现 0 个输入控件」。
+> 那不是坏了，是那个页面上还没有表。
+
 ### 环境要求
 
 - **Python 3.8+**（体检 / 清单 / 脱敏三个功能**只用标准库**）
@@ -74,23 +89,36 @@ pip install playwright
 playwright install chromium
 ```
 
-### 四步走
+### 五步走
 
 ```bash
-# 1. 还没有档案？先要一份空白问卷 —— 它列出网申会问的全部字段，你逐项填
-python scripts/make_checklist.py --out 网申信息清单.md
+# 0. 【第一步，别跳过】先出空白问卷 —— 它列出网申会问的全部字段
+python scripts/wangshen.py checklist --out 网申信息清单.md
+#    ⚠️ 清单没填 → 就没有档案 → 后面每一步都无从谈起
 
-# 2. 准备档案：照问卷把信息整理成 profile.json（也可以复制示例再改）
-cp fixtures/档案_示例.json profile.json
+# 1. 手上有简历？让它先替你抽一遍（省大半力气；本机抽取，不联网）
+python scripts/wangshen.py resume --in 我的简历.docx
+#    抽到的已填好，抽不到的留着待补。再照问卷把剩下的补进 profile.json
+#    （.docx/.pdf 需要额外的库；缺了它会告诉你装哪个，也可以先另存为 .txt）
 
-# 3. 体检
+# 2. 体检
 python scripts/wangshen.py check --profile profile.json
 
-# 4. 填表（建议先 --dry-run 看能不能识别字段）
+# 3. 填表（建议先 --dry-run 看能不能识别字段）
 python scripts/wangshen.py fill --profile profile.json \
     --url "https://某公司招聘页" --dry-run
 python scripts/wangshen.py fill --profile profile.json \
     --url "https://某公司招聘页" --screenshot filled.png
+#    每站默认 300 秒预算：到点、或识别率过低，它自己停手，转第 4 步
+
+# 4. 保底路径：填不动就生成「可复制清单页」，点一下就复制
+python scripts/wangshen.py sheet --profile profile.json \
+    --labels-file 页面字段.txt --out 填写清单.md
+python scripts/wangshen.py sheethtml --in 填写清单.md
+#    → 得到一个本机 HTML，浏览器打开，点「复制」再粘到网页对应框里
+
+# 5. 遇到填不上的框？顺手记一条，下一个人就不必再踩
+python scripts/wangshen.py report
 ```
 
 不确定怎么走？打印使用路径：
@@ -104,18 +132,26 @@ python scripts/wangshen.py guide
 ## 工作原理
 
 ```
-（还没有档案？）→ 生成《网申信息清单》空白问卷 → 逐项填 → profile.json（你的档案，只在本机）
+（还没有档案？）→ 生成《网申信息清单》空白问卷 → 逐项填 ──┐
+                                                        ├→ profile.json（你的档案，只在本机）
+（手上有简历？）→ 简历导入：本机正则抽取 → 预填 ─────────┘   （抽不到的不猜，留着待补）
         │
         ├─→ 体检 ──────────→ 缺什么字段
         │
         ├─→ 字段映射 ──────→ 页面标签 → 档案键（本地规则库，165 字段 / 643 标签）
         │                       │
-        ├─→ 自动填表 ←─────────┘  真值直接写进浏览器
-        │      └─ 打不开？→ 生成《填写清单》→ 你照着粘
+        ├─→ 自动填表 ←─────────┘  真值直接写进浏览器（单站 300 秒预算）
+        │      ├─ 打不开？→ 生成《填写清单》
+        │      └─ 到点 / 识别率过低？→ 停手
+        │                              └─→ 可复制清单页（点一下就复制）
         │
         ├─→ 脱敏通道 ──────→ 需要 AI 帮忙时，PII 先换成占位符
         │
+        ├─→ 反馈包（考生侧）→ 填不上的框 → 一段可直接贴成 Issue 的文本（零真值）
+        │
         └─→ 问题库 / 策略库 ─→ 遇到新坑就登记，试赢了解法就固化（见「它会自己变聪明」）
+                 ▲
+                 └── 回流收件台（作者侧）← GitHub Issue（inbox 一条命令收进来）
 ```
 
 **关键设计**：填表是机械动作，不需要"思考"。所以真值可以不过 AI；
@@ -129,16 +165,20 @@ python scripts/wangshen.py guide
 ```
 OpenWangShen/
 ├── scripts/
-│   ├── core.py            核心库：规则加载 / 标签索引 / 字段映射
-│   ├── check_profile.py   档案体检
-│   ├── fill_form.py       自动填表（playwright）
-│   ├── make_checklist.py  网申信息清单生成（投递前的空白问卷）
-│   ├── make_sheet.py      填写清单生成（保底模式）
-│   ├── mask_pii.py        PII 脱敏通道
-│   ├── dist_check.py      分发前真实值扫描（发布自检）
-│   ├── issue_registry.py  问题库：登记 / 状态机 / 按指纹匹配策略
-│   ├── issue_trial.py     问题试验：多路径试跑 → 断言择优 → 固化
-│   └── wangshen.py        统一入口
+│   ├── core.py             核心库：规则加载 / 标签索引 / 字段映射
+│   ├── check_profile.py    档案体检
+│   ├── make_checklist.py   网申信息清单生成（投递前的空白问卷）
+│   ├── import_resume.py    简历导入：本机抽取 → 预填档案（不联网）
+│   ├── fill_form.py        自动填表（playwright，单站 300 秒预算）
+│   ├── make_sheet.py       填写清单生成（保底模式）
+│   ├── sheet_html.py       可复制清单页（点一下就复制的本机网页）
+│   ├── mask_pii.py         PII 脱敏通道
+│   ├── report_feedback.py  反馈包（考生侧）：填不上的框 → 可提交的 Issue
+│   ├── inbox.py            回流收件台（作者侧）：汇总反馈 → 逐条决定收不收
+│   ├── dist_check.py       分发前真实值扫描（发布自检）
+│   ├── issue_registry.py   问题库：登记 / 状态机 / 按指纹匹配策略
+│   ├── issue_trial.py      问题试验：多路径试跑 → 断言择优 → 固化
+│   └── wangshen.py         统一入口
 ├── assets/
 │   ├── 字段规则_通用.json   字段知识库（165 字段 / 643 标签）
 │   ├── 记录组_通用.json     记录组口径（11 组 / 65 项，可多条的表格结构）
@@ -157,9 +197,14 @@ OpenWangShen/
 
 | 命令 | 作用 |
 |---|---|
+| `wangshen.py checklist --out 网申信息清单.md` | **第一步**：生成空白问卷 |
+| `wangshen.py resume --in 我的简历.docx` | 简历导入：本机抽成预填档案（不联网） |
 | `wangshen.py check --profile p.json` | 档案体检（必填项缺失会提示） |
 | `wangshen.py fill --profile p.json --url U [--dry-run]` | 自动填表，`--dry-run` 只映射不写入 |
 | `wangshen.py sheet --profile p.json --labels-file L.txt` | 生成填写清单 |
+| `wangshen.py sheethtml --in 填写清单.md` | 可复制清单页（点一下就复制） |
+| `wangshen.py report` | 反馈包：把填不上的框整理成可提交的 Issue |
+| `wangshen.py inbox` | 回流收件台（维护者用）：汇总反馈，逐条决定收不收 |
 | `wangshen.py mask --profile p.json --in a.txt --out b.txt` | PII 脱敏 |
 | `wangshen.py mask --profile p.json --in b.txt --out c.txt --restore` | 还原 |
 | `wangshen.py issue --list` | 看问题库（踩过的坑） |
@@ -178,6 +223,8 @@ OpenWangShen/
 | `--proxy http://127.0.0.1:端口` | 浏览器代理。**Chromium 不读环境变量，必须显式传** |
 | `--headed` | 显示浏览器窗口（默认无头） |
 | `--screenshot 路径` | 截图留存 |
+| `--budget 秒` | 单站硬预算（默认 300，0 = 不限）。到点自动停手，转可复制清单页 |
+| `--html 路径` | 提前停手时，直接生成可复制清单页到该路径 |
 
 ---
 
@@ -223,7 +270,17 @@ OpenWangShen/
 
 ### 想贡献一条？
 
+最省事的入口是这条命令 —— 不用会写 JSON，也不用懂「指纹」这些词：
+
+```bash
+python scripts/wangshen.py report
+```
+
+它把你遇到的问题整理成一段可直接提交的 Issue 文本。想深入改规则库，
 见 [CONTRIBUTING.md](CONTRIBUTING.md) 的「四、补控件指纹与策略」。
+
+> 维护者侧：`python scripts/wangshen.py inbox` 会把 GitHub 上的反馈汇总成一屏，
+> 每条给出「值得收 / 已有解 / 同字段」的建议，再按编号收或丢。
 
 ---
 
@@ -248,6 +305,18 @@ OpenWangShen/
 任何标准 HTML 表单都可以尝试。字段识别靠 `assets/字段规则_通用.json`
 的标签匹配，**未命中的字段会交给你手填，不会瞎猜**。
 遇到识别不了的字段，欢迎提 Issue 或直接补规则库（见 CONTRIBUTING）。
+
+**Q：某个框就是填不上，怎么办？**
+三条路，从稳到快：
+
+1. `wangshen.py sheet` + `sheethtml` 生成**可复制清单页**，点一下就粘过去（最稳）
+2. `wangshen.py fill` 会自己停手 —— 单站跑满 300 秒、或识别率低于 20% 就停，不白耗
+3. 跑 `wangshen.py report` 记一条反馈：哪个框、哪个系统、什么结果。
+   你提一次，**下一个遇到同一控件的人就不用再摸一遍**
+
+**Q：跑起来说「发现 0 个输入控件」？**
+多半是**页面还没走到表单**。先注册 / 登录，进到「填写简历信息」那一页再运行 ——
+本工具只看**当前页面**上的表单，不会替你点按钮往下走。这是设计如此，不是缺陷。
 
 ---
 
@@ -284,3 +353,10 @@ OpenWangShen/
 
 遇到字段识别失败、或者想补充规则，欢迎直接提
 [Issue](../../issues) 或 [Pull Request](../../pulls)；也欢迎加微信交流。
+
+**不知道怎么描述？** 跑一条命令就行 —— 它会问几个问题，然后给你一段
+**可以直接粘贴成 Issue** 的文字，格式不用你自己想：
+
+```bash
+python scripts/wangshen.py report
+```

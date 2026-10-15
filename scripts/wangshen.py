@@ -5,12 +5,17 @@ wangshen.py · OpenWangShen 统一入口
 ====================================
 把六个子工具收进一条命令，避免记一堆脚本名。
 
+    python scripts/wangshen.py checklist --out 网申信息清单.md     空白问卷（**第一步**）
+    python scripts/wangshen.py resume  --in 我的简历.docx          简历导入：本机抽成预填档案
     python scripts/wangshen.py check   --profile profile.json      档案体检
     python scripts/wangshen.py sheet   --profile profile.json ...  生成填写清单
+    python scripts/wangshen.py sheethtml --in 填写清单.md          可复制清单页（点一下就复制）
     python scripts/wangshen.py fill    --profile profile.json ...  自动填表（不提交）
     python scripts/wangshen.py mask    --profile profile.json ...  PII 脱敏
     python scripts/wangshen.py issue   --list                      问题库：登记 / 查询 / 策略匹配
     python scripts/wangshen.py trial   --issue <id> --path ...     试跑多路径 → 择优 → 固化
+    python scripts/wangshen.py report                              反馈包：填不上的框 → 可提交的 Issue
+    python scripts/wangshen.py inbox                               回流收件台：汇总别人提的反馈
     python scripts/wangshen.py selftest                            全部自测
     python scripts/wangshen.py guide                               打印使用路径
 
@@ -28,12 +33,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
 
 CMDS = {
+    "checklist": ("make_checklist.py", "空白问卷：投网申之前要先备好哪些信息（第一步）"),
+    "resume": ("import_resume.py", "简历导入：在本机把简历抽成预填档案（不联网）"),
     "check": ("check_profile.py", "档案体检：看你的档案缺什么"),
     "sheet": ("make_sheet.py", "生成填写清单（保底模式，零浏览器依赖）"),
+    "sheethtml": ("sheet_html.py", "可复制清单页：点一下就复制的本机网页"),
     "fill": ("fill_form.py", "自动填表：打开岗位页→识别字段→写入（不提交）"),
     "mask": ("mask_pii.py", "PII 脱敏：需要 AI 帮忙写开放题时先脱敏"),
     "issue": ("issue_registry.py", "问题库：登记踩过的坑 / 查解法 / 按指纹匹配策略"),
     "trial": ("issue_trial.py", "问题试验：多路径试跑 → 断言择优 → 固化进策略库"),
+    "report": ("report_feedback.py", "反馈包（考生侧）：把填不上的框整理成可提交的 Issue"),
+    "inbox": ("inbox.py", "回流收件台（作者侧）：汇总别人提的反馈，逐条决定收不收"),
 }
 
 
@@ -52,9 +62,19 @@ def guide():
 OpenWangShen · 推荐使用顺序
 ────────────────────────────────────────────────────────
 
-第 0 步  准备档案
-        复制 fixtures/档案_示例.json 为 profile.json，填成你自己的信息。
-        ⚠️ profile.json 只放本机，不要提交到 Git（.gitignore 已屏蔽）。
+⚠️ 本工具是**独立功能**：它不代你注册、不代你登录。
+   必须先自己完成注册 / 登录，**进到「填写简历信息」那个页面之后**再用。
+   停在登录页、首页、岗位列表页上跑，它只会告诉你「没扫到表单」。
+
+第 0 步  先出空白问卷（**这一步别跳**）
+        python scripts/wangshen.py checklist --out 网申信息清单.md
+        它把「网申会问到的字段」现算成一张空白问卷。
+        **清单没填，就没有档案；没有档案，后面每一步都无从谈起。**
+
+第 0.5 步  手上有现成简历？让它先替你抽一遍（可选，省大半力气）
+        python scripts/wangshen.py resume --in 我的简历.docx
+        在本机把简历抽成 profile.json：抽到的已填好，抽不到的留着待补。
+        （.docx / .pdf 需要额外的库；缺了它会告诉你装哪个。）
 
 第 1 步  体检
         python scripts/wangshen.py check --profile profile.json
@@ -68,16 +88,23 @@ OpenWangShen · 推荐使用顺序
         python scripts/wangshen.py fill --profile profile.json \\
             --url <岗位页地址> --screenshot filled.png
         程序填完会停下。**附件、志愿顺序、提交由你本人完成。**
+        每站默认 300 秒预算：到点、或识别率过低，它自己停手，转下一行。
 
-保底路径（第 2 步跑不通时）
+保底路径（第 2、3 步跑不通时 —— **多数人最后都靠这条**）
         python scripts/wangshen.py sheet --profile profile.json \\
             --labels-file 页面字段.txt --out 填写清单.md
-        生成清单，你照着往网页里粘。
+        python scripts/wangshen.py sheethtml --in 填写清单.md
+        先生成清单，再渲染成一张本机网页：点一下「复制」，粘到网页对应框里。
 
 需要 AI 帮写开放题时
         python scripts/wangshen.py mask --profile profile.json \\
             --in 草稿.txt --out 脱敏稿.txt
         把「脱敏稿」发给 AI，回来再 --restore 还原。
+
+填不上某个框？
+        python scripts/wangshen.py report
+        答几个问题，它会生成一段可以直接贴成 Issue 的反馈。
+        你踩的坑记下来，下一个人就不用再踩。
 
 ────────────────────────────────────────────────────────
 三条不可越过的线
@@ -101,6 +128,11 @@ def selftest():
         ("dist_check.py", ["dist_check.py", "--selftest"]),
         ("issue_registry.py", ["issue_registry.py", "--selftest"]),
         ("issue_trial.py", ["issue_trial.py", "--selftest"]),
+        ("make_checklist.py", ["make_checklist.py", "--selftest"]),
+        ("import_resume.py", ["import_resume.py", "--selftest"]),
+        ("sheet_html.py", ["sheet_html.py", "--selftest"]),
+        ("report_feedback.py", ["report_feedback.py", "--selftest"]),
+        ("inbox.py", ["inbox.py", "--selftest"]),
     ]:
         print("\n--- %s ---" % name)
         rc = subprocess.call([PY, os.path.join(HERE, args[0])] + args[1:])

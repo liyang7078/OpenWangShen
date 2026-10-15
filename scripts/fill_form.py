@@ -15,6 +15,20 @@ fill_form.py · 网申表单自动填写
   playwright（可选）：pip install playwright && playwright install chromium
   若未安装 → 自动降级提示改用 make_sheet.py 生成填写清单。
 
+每站预算
+--------
+  默认 **300 秒**（`--budget`，0 = 不限）。到点没跑完，或识别率低于 20%，
+  脚本会**停手**并给出一条「改用可复制清单页」的路：
+
+      python scripts/wangshen.py sheethtml --profile <档案> --labels-file 页面字段.txt
+
+  这不是失败，是**提前止损** —— 与其在一个不认的表单上耗到底，不如把已经
+  拿到的交给你，你照着粘。加 `--html <路径>` 可在停手时直接生成那张可复制页。
+
+退出码
+------
+  0 = 正常跑完（已停在提交前）   4 = 缺 playwright   5 = **提前停手**（见上）
+
 用法
 ----
   python scripts/fill_form.py --profile profile.json --url https://xxx --dry-run
@@ -30,6 +44,7 @@ import json
 import os
 import sys
 import threading
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import core  # noqa: E402
@@ -211,14 +226,21 @@ def _norm_date(v):
     return None, False
 
 
-def apply_plan(page, plan, fields_by_idx):
+def apply_plan(page, plan, fields_by_idx, deadline=None):
     """
-    执行填写。返回 {已填, 失败, 跳过, 日期补全}。
+    执行填写。返回 {已填, 失败, 跳过, 日期补全, 超时中止}。
     **本函数不触碰任何提交类按钮。**
+
+    `deadline` = 绝对时间戳（time.time() 口径）。到点即停手 —— 已完成的部分
+    照常保留在页面上，未完成的不再往下试，交给「可复制清单页」。
     """
     filled, failed, skipped, adjusted = 0, [], [], []
+    timed_out = False
 
     for item in plan:
+        if deadline is not None and time.time() > deadline:
+            timed_out = True
+            break
         if item["状态"] == "档案缺项":
             skipped.append({"label": item["label"], "原因": "档案缺项"})
             continue
@@ -249,7 +271,8 @@ def apply_plan(page, plan, fields_by_idx):
                 failed.append({"label": item["label"], "原因": "选项未匹配"})
         except Exception as e:
             failed.append({"label": item["label"], "原因": str(e).split("\n")[0][:80]})
-    return {"已填": filled, "失败": failed, "跳过": skipped, "日期补全": adjusted}
+    return {"已填": filled, "失败": failed, "跳过": skipped,
+            "日期补全": adjusted, "超时中止": timed_out}
 
 
 def _fill_choice(page, sel, item, field):
@@ -325,6 +348,32 @@ def arm_close_guard(release, seconds=CLOSE_GUARD_SEC, rc=0):
     threading.Thread(target=_watch, daemon=True).start()
 
 
+def _write_manual_html(args, fields, profile):
+    """提前停手时，直接把已扫到的字段转成「可复制清单页」。
+
+    它是**辅助**，不是主流程 —— 任何失败都只提示、不抛错，绝不影响填写结果。
+    """
+    try:
+        import sheet_html                                  # noqa: E402
+        labels = []
+        for f in fields:
+            lab = (f.get("label") or f.get("name") or "").strip()
+            if lab and lab not in labels:
+                labels.append(lab)
+        if not labels:
+            return ""
+        md = sheet_html.md_from_profile(args.profile, labels, args.rules)
+        ready, miss, meta = sheet_html.parse_md(md)
+        out = args.html
+        os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+        with open(out, "w", encoding="utf-8", newline="") as fh:
+            fh.write(sheet_html.render_html(ready, miss, meta))
+        return out
+    except Exception as exc:                              # noqa: BLE001
+        print("   （可复制页没能生成：%s）" % str(exc).split("\n")[0][:60])
+        return ""
+
+
 def run(args):
     try:
         from playwright.sync_api import sync_playwright
@@ -337,6 +386,11 @@ def run(args):
     rules = core.load_rules(args.rules)
     index = core.build_index(rules)
     profile = core.load_profile(args.profile)
+
+    t0 = time.time()
+    deadline = (t0 + args.budget) if args.budget and args.budget > 0 else None
+    if deadline:
+        print("[预算] 本站上限 %d 秒 —— 到点即停手，转「可复制清单页」" % args.budget)
 
     launch_kw = {"headless": not args.headed}
     if args.channel:
@@ -376,16 +430,36 @@ def run(args):
               % (report["可自动填"], len(report["档案缺项"]),
                  len(gates), len(report["规则库未命中"])))
 
+        # ---- 提前止损：超预算 或 识别率过低 → 停手，转可复制清单页 ----
+        rate = (report["可自动填"] / len(fields)) if fields else 0.0
+        report["识别率"] = round(rate, 3)
+        stop_reason = ""
+        if deadline and time.time() > deadline:
+            stop_reason = "超预算（%d 秒）" % args.budget
+        elif len(fields) >= 5 and rate < 0.2:
+            stop_reason = "识别率过低（%.0f%%，低于 20%%）" % (rate * 100)
+        if stop_reason:
+            report["停止原因"] = stop_reason
+            print("      ⚠️ %s —— 停手，不再往下填" % stop_reason)
+
         if args.dry_run:
             print("[4/5] --dry-run：不写入任何内容")
-            res = {"已填": 0, "失败": [], "跳过": [], "日期补全": []}
+            res = {"已填": 0, "失败": [], "跳过": [], "日期补全": [],
+                   "超时中止": False}
+        elif stop_reason:
+            print("[4/5] 已停手，不写入")
+            res = {"已填": 0, "失败": [], "跳过": [], "日期补全": [],
+                   "超时中止": True, "原因": stop_reason}
         else:
             print("[4/5] 写入表单（不提交）")
-            res = apply_plan(page, plan, fields_by_idx)
+            res = apply_plan(page, plan, fields_by_idx, deadline=deadline)
             print("      已填 %d ／ 失败 %d ／ 跳过 %d"
                   % (res["已填"], len(res["失败"]), len(res["跳过"])))
             for a in res.get("日期补全", []):
                 print("      ⚠️ %s：%s" % (a["label"], a["说明"]))
+            if res.get("超时中止"):
+                report["停止原因"] = "填写途中到点（%d 秒）" % args.budget
+                print("      ⚠️ %s —— 已停手" % report["停止原因"])
 
         report["填写结果"] = res
 
@@ -418,8 +492,21 @@ def run(args):
         release.set()
 
     print("")
+    reason = report.get("停止原因")
+    if reason:
+        print("⚠️ 本站提前停手：%s" % reason)
+        print("   已扫到 %d 个字段。转成「可复制清单页」照着粘更稳：" % len(fields))
+        print("       python scripts/wangshen.py sheethtml --profile <你的档案> \\")
+        print("           --labels-file 页面字段.txt")
+        if args.html:
+            wrote = _write_manual_html(args, fields, profile)
+            if wrote:
+                print("   已生成：%s（用浏览器打开，点「复制」）" % wrote)
+        else:
+            print("   想让脚本停手时直接生成那张页：加 --html 填写清单.html")
+        print("")
     print("⚠️ 已停在提交前。**附件、志愿顺序、最终提交由你本人完成。**")
-    return 0
+    return 5 if reason else 0
 
 
 def main():
@@ -436,6 +523,10 @@ def main():
     ap.add_argument("--screenshot", help="截图输出路径")
     ap.add_argument("--out", help="报告 JSON 输出路径")
     ap.add_argument("--dry-run", action="store_true", help="只映射不写入")
+    ap.add_argument("--budget", type=int, default=300,
+                    help="每站硬预算（秒；0 = 不限，默认 300）")
+    ap.add_argument("--html", default="",
+                    help="提前停手时，直接生成可复制清单页到该路径")
     args = ap.parse_args()
     return run(args)
 

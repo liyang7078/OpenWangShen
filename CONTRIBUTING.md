@@ -186,3 +186,48 @@ python scripts/wangshen.py trial --issue Q-... --path ... --promote \
 ```
 
 有了这三行，补规则就是几分钟的事。
+
+### 不用自己排版：跑 `report`
+
+```bash
+python scripts/wangshen.py report
+```
+
+它会问上面那几个问题，自动带上环境信息，然后输出一段**可以直接粘贴成 Issue**
+的文本。写盘与打印前都会跑一次零真值反证 —— 命中手机号 / 邮箱 / 身份证 /
+本机绝对路径就**中止**（既不写盘、也不打印），所以不会把你的信息带出去。
+
+---
+
+## 七、维护者：怎么处理收到的反馈
+
+对应的是 `inbox.py` —— 把 GitHub Issue 拉成一屏，与你本地的问题库**查重**：
+
+```bash
+python scripts/wangshen.py inbox
+```
+
+输出形如：
+
+| # | Issue | 字段标签 | 系统 | 查重 | 建议 |
+|---|---|---|---|---|---|
+| 1 | #12 | 联系人手机* | 北森 | 新 | 值得收 |
+| 2 | #13 | 上传附件 | Moka | **同字段** | 已有解，回帖告知 |
+
+然后按编号处置：
+
+```bash
+python scripts/wangshen.py inbox --accept 1   # 收进问题库（落在「待试验」）
+python scripts/wangshen.py inbox --drop 2     # 或忽略
+```
+
+两条设计约束：
+
+1. **`--accept` 只是登记，不是采纳。** 收进来的条目状态是「待试验」，
+   仍须跑 `trial` 试赢才能固化进策略库 —— **没试赢不许固化**，与本文档
+   「四、补控件指纹与策略」的硬门槛一致
+2. **入库前会再过一次零真值反证。** 即使 Issue 正文里混了真值，
+   写盘前也会被 `guard()` 拦住并中止
+
+数据源用**标准库 urllib 匿名读取公开仓库的 Issue 列表**，
+不需要 `gh` CLI，也不需要 token。拉不到时会给出降级做法（`--from-file`）。
