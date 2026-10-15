@@ -12,12 +12,25 @@ dist_check.py · 分发前「真实值」扫描器
 它挡不住「把真值粘贴进示例文件」「把真值写进文档」这类事故。
 本脚本就是补这一刀。
 
-四条判据
+五条判据
 --------
 1. **路径规则**：入库路径命中「本就该被忽略」的模式（profile.json 等）
 2. **值等同**  ：入库文本中出现与 `--profile` 某一字段**完全相等**的值
 3. **结构模式**：出现校验位合法的 18 位身份证 / 11 位手机号 / 邮箱
 4. **人属性**  ：规则类文件（`assets/` · `sites/`）里出现第一人称或数值型个人属性
+5. **语法下限**：README 承诺 Python 3.8+，入库 `.py` 里就不能出现 3.9+ 才成立的写法
+   （这不是隐私判据，但同属「分发前必须站得住的承诺」—— 承诺塌了，
+   用户在 3.8 上 `git clone` 下来第一行就跑不动）
+
+判据 5 的边界（2026-10-16 新增，**别把它想得比实际强**）
+--------------------------------------------------------
+`ast.parse(feature_version=(3, 8))` 的判别力很弱 —— 实测：`x: list[int]`、
+`a = {} | {}`、注解 `int | None` 在 3.8 模式下**一律"通过"**，
+因为它们语法合法、到**运行期**才炸。所以判据 5 分两段：
+  · 语法层：`ast.parse(..., feature_version=(3, 8))`
+  · 运行期层：按 AST 找注解里的 `X | Y`、内建泛型下标、3.9+/3.11+ 的 API
+**真正的判据是 CI 的 py3.8 job（真解释器真跑）**，本地这两段只负责提前发现。
+已知未覆盖：非注解位置的 `{} | {}`（与集合/位运算在静态上不可分）—— 这类交给 CI。
 
 **判据 2 是最硬的一条** —— 只有它能区分「文档里的假样例」与「真人数据」。
 判据 3 会跳过 `fixtures/档案_示例.json` 里的**官方假值**与常见的
@@ -64,6 +77,7 @@ dist_check.py · 分发前「真实值」扫描器
 """
 
 import argparse
+import ast
 import json
 import os
 import re
@@ -194,6 +208,115 @@ def id_checksum_ok(v):
     except ValueError:
         return False
     return ID_C[s % 11] == v[17].upper()
+
+
+# ── 判据 5：Python 语法下限 ─────────────────────────────────────
+# README 承诺「Python 3.8+」。承诺得有东西盯着，否则就是空承诺
+# （本仓有过先例：README 承诺 releases/latest，而仓库一个 tag 都没有）。
+#
+# 为什么不能只靠 feature_version：见文件头「判据 5 的边界」，已实测确认
+# `x: list[int]` / `注解 int | None` 在 3.8 模式下会**误判为通过**。
+PY_MIN = (3, 8)
+
+PY38_RUNTIME_API = (
+    ("removeprefix", "str.removeprefix 需要 3.9+"),
+    ("removesuffix", "str.removesuffix 需要 3.9+"),
+    ("BooleanOptionalAction", "argparse.BooleanOptionalAction 需要 3.9+"),
+)
+PY38_MODULES = {"graphlib": "3.9+", "zoneinfo": "3.9+", "tomllib": "3.11+"}
+PY38_GENERICS = frozenset(("list", "dict", "set", "tuple", "frozenset", "type"))
+
+
+class _Py38Visitor(ast.NodeVisitor):
+    """只盯「语法合法、但 3.8 跑不起来」的写法。不评风格，不做语义分析。"""
+
+    def __init__(self):
+        self.hits = []
+
+    def _note(self, node, why):
+        self.hits.append((getattr(node, "lineno", 0), why))
+
+    def _scan_ann(self, node, ann):
+        if ann is None:
+            return
+        for sub in ast.walk(ann):
+            if isinstance(sub, ast.BinOp) and isinstance(sub.op, ast.BitOr):
+                self._note(node, "注解里的 `X | Y` 联合写法 → 需要 3.10+（3.8 会在导入时 TypeError）")
+            elif isinstance(sub, ast.Subscript):
+                v = sub.value
+                if isinstance(v, ast.Name) and v.id in PY38_GENERICS:
+                    self._note(node, "注解里的内建泛型下标（如 list[int]）→ 需要 3.9+")
+
+    def _scan_func(self, node):
+        a = node.args
+        for arg in list(a.posonlyargs) + list(a.args) + list(a.kwonlyargs):
+            self._scan_ann(node, arg.annotation)
+        for extra in (a.vararg, a.kwarg):
+            if extra is not None:
+                self._scan_ann(node, extra.annotation)
+        self._scan_ann(node, node.returns)
+        self.generic_visit(node)
+
+    visit_FunctionDef = _scan_func
+    visit_AsyncFunctionDef = _scan_func
+
+    def visit_AnnAssign(self, node):
+        self._scan_ann(node, node.annotation)
+        self.generic_visit(node)
+
+    def _scan_api_name(self, node, name):
+        for api, why in PY38_RUNTIME_API:
+            if name == api:
+                self._note(node, why)
+
+    # 这些 API 既可能被**调用**（`s.removeprefix('a')`），也可能只被**引用**
+    # （`action=argparse.BooleanOptionalAction` —— 它是值，不是调用）。
+    # 只挂 visit_Call 会漏掉后者，所以扫 Attribute 与 Name。
+    def visit_Attribute(self, node):
+        self._scan_api_name(node, node.attr)
+        self.generic_visit(node)
+
+    def visit_Name(self, node):
+        self._scan_api_name(node, node.id)
+        self.generic_visit(node)
+
+    def visit_Import(self, node):
+        for a in node.names:
+            root = a.name.split(".")[0]
+            if root in PY38_MODULES:
+                self._note(node, "import %s → 需要 %s" % (a.name, PY38_MODULES[root]))
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node):
+        root = (node.module or "").split(".")[0]
+        if root in PY38_MODULES:
+            self._note(node, "from %s import ... → 需要 %s" % (node.module, PY38_MODULES[root]))
+        self.generic_visit(node)
+
+
+def py_min_problems_in(src, name="<probe>"):
+    """纯函数：一段源码在 3.8 上会不会出问题。返回 [(行号, 说明)]。
+
+    语法层先过一遍；过了再按 AST 找运行期才炸的写法。
+    """
+    try:
+        tree = ast.parse(src, filename=name, feature_version=PY_MIN)
+    except SyntaxError as e:
+        return [(e.lineno or 0,
+                 "3.8 解析器不接受这段语法：%s" % str(e).split("(")[0].strip()[:48])]
+    v = _Py38Visitor()
+    v.visit(tree)
+    return sorted(set(v.hits))
+
+
+def py_min_problems(rel):
+    """对入库文件跑判据 5。读不到（二进制/非 UTF-8）返回 []。"""
+    try:
+        with open(os.path.join(core.PROJECT_ROOT, rel), "r", encoding="utf-8") as f:
+            src = f.read()
+    except (OSError, UnicodeDecodeError):
+        return []
+    return py_min_problems_in(src, rel)
 
 
 def tracked_files():
@@ -360,6 +483,13 @@ def check(profile=None, verbose=True):
                 if NUMERIC_ATTR_RE.search(line):
                     warns.append(("人属性", rel, i, "规则文件里出现数值型个人属性"))
 
+    # 判据 5（2026-10-16 新增）：README 承诺的下限，不能只是承诺
+    for rel in files:
+        if not rel.endswith(".py"):
+            continue
+        for ln, why in py_min_problems(rel):
+            fails.append(("语法下限", rel, ln, why))
+
     # 覆盖面缺口 ⇒ 不得判定「可以分发」（fail-closed）
     if unreadable:
         fails.append(("覆盖不全", "（%d 个文件）" % len(unreadable), 0,
@@ -373,6 +503,10 @@ def check(profile=None, verbose=True):
         if public:
             print("公开用途地址：%d 个（取自 assets/反馈渠道.json 的「反馈邮箱」）"
                   % len(public))
+        pyfiles = [f for f in files if f.endswith(".py")]
+        print("语法下限：Python %d.%d ｜ 校验 %d 个 .py"
+              "（本地只做静态近似，最终判据是 CI 的 py3.8 job）"
+              % (PY_MIN[0], PY_MIN[1], len(pyfiles)))
         if profile:
             print("对照档案字段值：%d 个（只用于比对，不打印）" % len(values))
         print()
@@ -484,9 +618,31 @@ def selftest():
     assert len(pub) <= 1, "公开用途地址只该有一个来源"
     print("【自测 9】公开用途地址白名单：%d 个（来源 %s）✓" % (len(pub), listed[0]))
 
+    # 判据 5（2026-10-16 新增）：README 承诺 Python 3.8+，就得有东西盯着。
+    # 正例：本仓全部入库 .py 必须过 —— 过不了就说明「3.8+」已经是空承诺。
+    pyfiles = [f for f in files if f.endswith(".py")]
+    assert pyfiles, "没有扫到任何 .py，判据 5 形同虚设"
+    offenders = {p: py_min_problems(p) for p in pyfiles}
+    offenders = {k: v for k, v in offenders.items() if v}
+    assert not offenders, "本仓有 .py 过不了 3.8 下限：%s" % list(offenders)[:2]
+
+    # 反例：三种「语法合法、3.8 运行期才炸」的写法必须被抓到
+    # （只用 feature_version 是抓不到的 —— 这一点前面实测确认过）
+    assert py_min_problems_in("def f(x: int | None):\n    pass\n"), "注解联合写法漏了"
+    assert py_min_problems_in("def f(x: list[int]):\n    pass\n"), "内建泛型下标漏了"
+    assert py_min_problems_in("y = 'ab'.removeprefix('a')\n"), "removeprefix 漏了"
+    assert py_min_problems_in("import tomllib\n"), "tomllib 漏了"
+    assert py_min_problems_in("match x:\n    case 1:\n        pass\n"), "match 漏了"
+
+    # 正例：合法 3.8 写法不许误报（位运算 | 不是注解，不得当成联合类型）
+    assert py_min_problems_in("def f(x=None):\n    return {}.get(x, 0)\n") == [], "误报"
+    assert py_min_problems_in("a = 1 | 2\nb = [i for i in range(3)]\n") == [], "误报位运算"
+    print("【自测 10】Python 3.8 下限：%d 个 .py 全过；"
+          "注解联合／泛型下标／新 API／match 均能抓到 ✓" % len(pyfiles))
+
     import shutil
     shutil.rmtree(tmp, ignore_errors=True)
-    print("【自测通过】四条判据全部生效")
+    print("【自测通过】五条判据全部生效")
     return 0
 
 

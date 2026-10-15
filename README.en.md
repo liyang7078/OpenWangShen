@@ -81,12 +81,14 @@ security defects (please don't open a public issue for those).
 
 ```bash
 python scripts/wangshen.py selftest              # every script's built-in selftest
-python -m unittest discover -s tests             # 139 unit tests, stdlib only
+python -m unittest discover -s tests             # 151 unit tests, stdlib only
 python scripts/dist_check.py                     # pre-release leak scan
 python scripts/gen_issue_template.py --check     # issue template / option sets in sync
+python scripts/doc_check.py                      # docs' numbers vs the actual assets
 ```
 
-These are the same commands CI runs (Ubuntu, three Python versions, plus Windows).
+These are the same commands CI runs (Ubuntu, four Python versions including the
+3.8 lower bound we promise, plus Windows).
 
 ## Disclaimer
 

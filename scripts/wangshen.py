@@ -17,6 +17,7 @@ wangshen.py · OpenWangShen 统一入口
     python scripts/wangshen.py report                              反馈包：填不上的框 → 可提交的 Issue
     python scripts/wangshen.py inbox                               回流收件台：汇总别人提的反馈
     python scripts/wangshen.py template --check                    Issue 模板与脚本选项集是否一致
+    python scripts/wangshen.py docs                                文档数字与示例产物是否与资产一致
     python scripts/wangshen.py selftest                            全部自测
     python scripts/wangshen.py guide                               打印使用路径
 
@@ -59,6 +60,7 @@ CMDS = {
     "report": ("report_feedback.py", "反馈包（考生侧）：把填不上的框整理成可提交的 Issue"),
     "inbox": ("inbox.py", "回流收件台（作者侧）：汇总别人提的反馈，逐条决定收不收"),
     "template": ("gen_issue_template.py", "由脚本选项集生成 Issue 模板（--check 防漂移）"),
+    "docs": ("doc_check.py", "文档数字一致性门：文档里的数字 vs 资产现算值（--fix 可改写）"),
 }
 
 
@@ -176,8 +178,11 @@ def selftest():
         ("report_feedback.py", ["report_feedback.py", "--selftest"]),
         ("inbox.py", ["inbox.py", "--selftest"]),
         ("gen_issue_template.py", ["gen_issue_template.py", "--selftest"]),
+        ("doc_check.py", ["doc_check.py", "--selftest"]),
         # 执行点（不是文档承诺）：Issue 模板若与脚本选项集漂移，这里直接红。
         ("Issue 模板一致性", ["gen_issue_template.py", "--check"]),
+        # 执行点（不是文档承诺）：文档里的数字若与资产分叉，这里直接红。
+        ("文档数字一致性", ["doc_check.py"]),
     ]:
         print("\n--- %s ---" % name)
         rc = subprocess.call([PY, os.path.join(HERE, args[0])] + args[1:])

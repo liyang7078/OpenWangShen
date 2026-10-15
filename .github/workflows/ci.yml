@@ -9,6 +9,10 @@
 #      本地绿而 CI 红，就说明自测漏了环境相关的分支。
 #   ③ 跨平台 —— 本项目主要面向 Windows 用户，而开发机上最容易漏的是
 #      控制台编码与路径分隔符。所以 Windows 另跑一支。
+#   ④ 承诺要可验证 —— README 写「Python 3.8+」，那就真拿 3.8 跑一遍。
+#      本地 dist_check 里那段 AST 扫描只是静态近似（实测判别力有限：
+#      `x: list[int]`、注解 `int | None` 在 feature_version=(3,8) 下会误判为通过），
+#      **这一支才是「3.8+」的真判据**。
 
 name: CI
 
@@ -31,13 +35,24 @@ jobs:
   # 主干：Linux 多版本 × 零依赖自测
   # ------------------------------------------------------------------
   selftest:
-    name: 自测（ubuntu / py${{ matrix.python-version }}）
-    runs-on: ubuntu-latest
+    name: 自测（${{ matrix.os }} / py${{ matrix.python-version }}）
+    # os 跟着矩阵走：3.8 的构建产物在 ubuntu-latest（24.04）上装不出来，
+    # 所以下限那一支单独钉在 22.04。（本机无法预演；首次 push 时确认。）
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # 下限按 README 承诺（3.8+）从宽覆盖；上限跟到最新稳定版。
-        python-version: ["3.9", "3.11", "3.13"]
+        include:
+          # 下限对齐 README 承诺（3.8+）
+          - os: ubuntu-22.04
+            python-version: "3.8"
+          # 其余跟最新稳定版，取中间一档做回归
+          - os: ubuntu-latest
+            python-version: "3.9"
+          - os: ubuntu-latest
+            python-version: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.13"
 
     steps:
       - uses: actions/checkout@v4
@@ -58,6 +73,11 @@ jobs:
 
       - name: 全部脚本内置自测
         run: python scripts/wangshen.py selftest
+
+      # 文档里的数字必须等于资产里现算的数字；examples/ 的产物必须等于
+      # 生成器现在的输出。改词表却忘了改文档，这里直接红。
+      - name: 文档数字与示例产物一致性
+        run: python scripts/doc_check.py
 
       - name: 单元测试
         run: python -m unittest discover -s tests -v

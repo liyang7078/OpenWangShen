@@ -196,7 +196,8 @@ OpenWangShen/
 │   ├── report_feedback.py  反馈包（考生侧）：填不上的框 → 可提交的 Issue
 │   ├── inbox.py            回流收件台（作者侧）：汇总反馈 → 逐条决定收不收
 │   ├── gen_issue_template.py  Issue 模板生成器（选项集单一来源，--check 防漂移）
-│   ├── dist_check.py       分发前真实值扫描（发布自检）
+│   ├── dist_check.py       分发前真实值扫描（发布自检，五条判据）
+│   ├── doc_check.py        文档数字一致性门：文档里的数字 vs 资产现算值（--fix 可改写）
 │   ├── issue_registry.py   问题库：登记 / 状态机 / 按指纹匹配策略
 │   ├── issue_trial.py      问题试验：多路径试跑 → 断言择优 → 固化
 │   ├── htmlprobe.py        迷你 HTML 探针（自测与单测共用，断言结构而非文案）
@@ -210,9 +211,9 @@ OpenWangShen/
 ├── sites/                 站点适配库（按站点：字段选择器 + 选项映射）
 ├── fixtures/              测试夹具（示例档案 / 模拟网申页）
 ├── examples/              示例产物
-├── tests/                 单元测试（139 项，纯标准库，无第三方测试框架）
+├── tests/                 单元测试（151 项，纯标准库，无第三方测试框架）
 ├── .github/
-│   ├── workflows/ci.yml   持续集成：Linux 三档 Python + Windows 各跑一遍自测 / 单测 / 分发扫描
+│   ├── workflows/ci.yml   持续集成：Linux 四档 Python（含 3.8 下限）+ Windows 各跑一遍自测 / 单测 / 分发扫描
 │   ├── ISSUE_TEMPLATE/    字段识别失败模板（由脚本生成，勿手改）
 │   └── PULL_REQUEST_TEMPLATE.md
 ├── requirements.txt       依赖清单：核心零依赖，可选增强逐条说明缺了会怎样
@@ -246,6 +247,8 @@ OpenWangShen/
 | `wangshen.py trial --issue Q-... --path "名=命令" --assert "指标 > 0"` | 多路径试跑择优 |
 | `wangshen.py trial ... --promote --动作 "..." --指纹 x` | 把胜出解法固化进策略库 |
 | `wangshen.py template --check` | 校验 Issue 模板与脚本选项集**没漂移**（CI 也跑这条） |
+| `wangshen.py docs` | 校验文档里的数字 == 资产现算值、示例产物 == 生成器输出（CI 也跑这条） |
+| `wangshen.py docs --fix` | 同上，但直接把不一致的数字改写掉（改前自动留 `.bak`） |
 | `wangshen.py selftest` | 全部自测 |
 | `wangshen.py guide` | 打印使用路径 + **术语对照** |
 

@@ -9,11 +9,13 @@ test_feedback.py · 回流链的回归测试
   ② 考生侧产出的条目，作者侧收得进来 —— 一条完整闭环，键名逐项对得上
   ③ 链上用到的键名一律落在词表内（否则档案会「看着填了、实际取不到」）
 
-另外钉住四组「后来补上的保证」：
+另外钉住六组「后来补上的保证」：
   ④ 统一产物写入 `core.safe_write`：原子替换 / 默认不覆盖 / 基准目录校验
   ⑤ 面板化写入的纯函数（地区切分、控件分类、日期候选、报错翻译）
   ⑥ 作者侧收件台的优先级排序与陈旧提醒（只记时间与计数，不记真值）
   ⑦ Issue 模板与脚本选项集不漂移（模板是生成的，改了选项集必须重生成）
+  ⑧ 文档里的数字必须能从资产现算出来，示例产物必须等于生成器输出（`doc_check`）
+  ⑨ README 承诺的 Python 3.8+ 有东西盯着（`dist_check` 判据 5；真判据是 CI 那支 3.8 job）
 
 断言的写法约定
 --------------
@@ -41,6 +43,8 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
 import core                   # noqa: E402
+import dist_check             # noqa: E402
+import doc_check              # noqa: E402
 import fill_form              # noqa: E402
 import gen_issue_template     # noqa: E402
 import htmlprobe              # noqa: E402
@@ -936,6 +940,112 @@ class TestFixturePageMapping(unittest.TestCase):
         """字段优先级生效：高频字段排在最前（预算到点时先填的就是它）。"""
         first = [p["key"] for p in self.plan if p["状态"] == "待填"][:1]
         self.assertEqual(first, ["姓名"], first)
+
+
+class TestDocCheck(unittest.TestCase):
+    """文档数字一致性门：数字必须能从资产现算出来，示例产物必须等于生成器输出。
+
+    为什么值得单测：这道门**本身就是「承诺」**。如果它只会说「全部一致」，
+    那它比没有更糟 —— 会让人以为数字被核对过了。所以下面每条断言都配了反证。
+    """
+
+    def test_facts_are_self_consistent(self):
+        fx = doc_check.facts()
+        self.assertEqual(fx["字段总数"], fx["可填值字段"] + fx["附件类"], fx)
+        self.assertEqual(fx["必填档"] + fx["常用档"] + fx["其余选填档"],
+                         fx["可填值字段"], fx)
+        self.assertTrue(all(isinstance(v, int) and v > 0 for v in fx.values()), fx)
+
+    def test_facts_come_from_assets_not_constants(self):
+        """事实是现算的：两次调用必须一致，且确实等于资产里的条数。"""
+        self.assertEqual(doc_check.facts(), doc_check.facts())
+        fields = core.load_rules()
+        self.assertEqual(doc_check.facts()["字段总数"], len(fields))
+
+    def test_no_doc_drift_today(self):
+        """当前状态：文档里的数字都算得出来（有漂移就是红）。"""
+        bad = doc_check.check_docs(doc_check.facts())
+        self.assertEqual(bad, [], "文档数字已与资产分叉：%s" % (bad[:3],))
+
+    def test_examples_match_generators(self):
+        """examples/ 下两份产物必须等于**现在**的生成器输出。"""
+        bad = doc_check.check_examples()
+        self.assertEqual(bad, [], "示例产物已与生成器分叉：%s" % (bad[:2],))
+
+    def test_gate_bites_on_wrong_number(self):
+        """反证：数字写错必须被抓到，且要指出是哪一个事实键。"""
+        fx = doc_check.facts()
+        _rel, pat, keys = doc_check.CLAIMS[0]
+        text = "字段知识库（%d 字段 / %d 标签 / %d 组值域别名）" % (
+            fx["字段总数"] + 1, fx["标签写法"], fx["值域别名组"])
+        hits = doc_check.claims_in(text, pat, keys, fx)
+        self.assertEqual([h[0] for h in hits], ["字段总数"], hits)
+        self.assertEqual(hits[0][1], fx["字段总数"] + 1)
+        self.assertEqual(hits[0][2], fx["字段总数"])
+
+    def test_gate_bites_on_deleted_claim(self):
+        """反证：把声明整句删掉也得报 —— 门不许随着文案改动静默失效。"""
+        fx = doc_check.facts()
+        _rel, pat, keys = doc_check.CLAIMS[0]
+        self.assertTrue(doc_check.claims_in("这段话里没有那条声明", pat, keys, fx))
+
+    def test_every_claim_key_is_real(self):
+        """声明表里不许出现打错的键名（打错就会 IndexError 或静默通过）。"""
+        fx = doc_check.facts()
+        used = set()
+        for _rel, _pat, ks in doc_check.CLAIMS:
+            used.update(ks)
+        self.assertTrue(used <= set(fx), sorted(used - set(fx)))
+
+    def test_example_stamps_are_fixed(self):
+        """示例产物的生成时间必须是固定示例戳 —— 否则校验不可能可复现。"""
+        for rel, content in doc_check.regenerate_examples():
+            with self.subTest(rel=rel):
+                self.assertIn("生成时间", content)
+        self.assertIn(doc_check.SHEET_STAMP,
+                      dict(doc_check.regenerate_examples())[doc_check.SHEET_EXAMPLE])
+
+
+class TestPythonFloor(unittest.TestCase):
+    """README 承诺 Python 3.8+。判据 5 要真的会咬，且有反证撑住。"""
+
+    def test_repo_passes_the_floor(self):
+        files = [f for f in dist_check.tracked_files() if f.endswith(".py")]
+        self.assertTrue(files, "没扫到 .py，判据 5 形同虚设")
+        bad = {f: dist_check.py_min_problems(f) for f in files}
+        bad = {k: v for k, v in bad.items() if v}
+        self.assertEqual(bad, {}, "有 .py 过不了 3.8 下限：%s" % bad)
+
+    def test_catches_runtime_only_breakage(self):
+        """这三种都是**语法合法**、3.8 运行期才炸 —— 只靠 feature_version 抓不到。"""
+        cases = {
+            "注解联合": "def f(x: int | None):\n    pass\n",
+            "内建泛型下标": "def f(x: list[int]):\n    pass\n",
+            "return 注解": "def f() -> dict[str, int]:\n    pass\n",
+            "removeprefix": "y = 'ab'.removeprefix('a')\n",
+            "BooleanOptionalAction": (
+                "import argparse\n"
+                "p = argparse.ArgumentParser()\n"
+                "p.add_argument('--x', action=argparse.BooleanOptionalAction)\n"),
+            "BooleanOptionalAction 直接导入": (
+                "from argparse import BooleanOptionalAction\n"
+                "x = BooleanOptionalAction\n"),
+            "tomllib": "import tomllib\n",
+            "zoneinfo": "from zoneinfo import ZoneInfo\n",
+        }
+        for name, src in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(dist_check.py_min_problems_in(src), name)
+
+    def test_no_false_positive_on_bitwise_or(self):
+        """位运算 `|` 不是类型联合，不许误报。"""
+        self.assertEqual(dist_check.py_min_problems_in("a = 1 | 2\n"), [])
+        self.assertEqual(dist_check.py_min_problems_in("def f(x=None):\n    return x or 0\n"), [])
+
+    def test_annotation_scan_does_not_leak_into_bodies(self):
+        """只扫注解：函数体里的 `a | b` 是位运算/集合并，不该被当成类型联合。"""
+        self.assertEqual(
+            dist_check.py_min_problems_in("def f():\n    return {1} | {2}\n"), [])
 
 
 if __name__ == "__main__":

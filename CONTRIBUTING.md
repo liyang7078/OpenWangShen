@@ -49,9 +49,10 @@
 python scripts/wangshen.py selftest
 python -m unittest discover -s tests
 python scripts/dist_check.py     # 确认没有真实信息混进仓库
+python scripts/doc_check.py      # 确认文档里的数字没跟资产分叉
 ```
 
-这几条**就是 CI 跑的命令**（Linux 三档 Python + Windows 各跑一遍）。
+这几条**就是 CI 跑的命令**（Linux 四档 Python，含 3.8 下限；Windows 再跑一遍）。
 本地绿而 CI 红，说明自测漏了环境相关的分支，请补上而不是删掉检查。
 
 改动了**选项集 / 词表 / Issue 模板**的，再加一条：
@@ -59,6 +60,11 @@ python scripts/dist_check.py     # 确认没有真实信息混进仓库
 ```bash
 python scripts/gen_issue_template.py --check   # 模板与脚本选项集是否漂移
 ```
+
+**动了词表或脚本产出，就会牵动文档里的数字**（字段数、标签数、清单三档、
+示例产物……）。这类不用自己算 —— 跑 `python scripts/doc_check.py`，
+它把该改的一处不漏地列出来；`--fix` 可直接改写（改前自动留 `.bak`）。
+它也会在 CI 里跑，**分叉就是红的**。
 
 提交 PR 时请照
 [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md)
