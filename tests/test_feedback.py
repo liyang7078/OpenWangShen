@@ -17,6 +17,7 @@ import os
 import sys
 import tempfile
 import unittest
+from html.parser import HTMLParser
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -218,6 +219,365 @@ class TestSheetHtml(unittest.TestCase):
         h = sheet_html.render_html([], [], {})
         self.assertTrue(h.startswith("<!DOCTYPE html>"))
         self.assertTrue(h.rstrip().endswith("</html>"))
+
+
+class TestGuardDeformation(unittest.TestCase):
+    """
+    红队反证：真值的**变形写法**以前能穿透 `guard()`。
+    每一条都必须被判为「拦下」—— 这是执行点，不是文档承诺。
+
+    ⚠️ 探针一律**拼接构造**，不写字面量：否则 dist_check 会举报本仓库自己。
+    """
+
+    def setUp(self):
+        self.phone = "138" + "12345678"
+        self.mail = "zhangsan" + chr(64) + "qq" + ".com"
+        self.addr = "北京市" + "海淀区中关村大街1号院"
+
+    def _blocked(self, text):
+        return not reg.guard(text, {"现象": text})[0]
+
+    def test_fullwidth_digits_blocked(self):
+        full = "".join(chr(0xFF10 + int(c)) for c in self.phone)
+        self.assertTrue(self._blocked("联系人手机*" + full))
+
+    def test_space_separated_blocked(self):
+        self.assertTrue(self._blocked("138 1234 5678"))
+
+    def test_hyphen_separated_blocked(self):
+        self.assertTrue(self._blocked("138-1234-5678"))
+
+    def test_dotted_blocked(self):
+        self.assertTrue(self._blocked("138.1234.5678"))
+
+    def test_non_placeholder_email_blocked(self):
+        self.assertTrue(self._blocked(self.mail))
+
+    def test_fullwidth_email_blocked(self):
+        full = "".join(chr(0xFF10 + int(c)) if c.isdigit() else
+                       (chr(ord(c) + 0xFEE0) if 'a' <= c <= 'z' or 'A' <= c <= 'Z' else c)
+                       for c in self.mail)
+        self.assertTrue(self._blocked(full))
+
+    def test_detailed_address_blocked(self):
+        self.assertTrue(self._blocked(self.addr))
+
+    def test_local_path_blocked(self):
+        self.assertTrue(self._blocked("D:" + "/" + "私密/简历.pdf"))
+
+    def test_http_url_not_false_positive(self):
+        """http:// 里的 `p:/` 不能被误判成本机路径。"""
+        self.assertTrue(reg.guard("页面是 https://job.example.com/a", {})[0])
+
+    def test_normal_description_still_clean(self):
+        for s in ("北森上传控件被隐藏，标签取不到",
+                  "户籍所在地区县填写规范",
+                  "下拉是虚拟列表，先输入关键词再选"):
+            self.assertTrue(reg.guard(s, {})[0], s)
+
+    def test_hits_are_masked_not_echoed(self):
+        """命中样本必须脱敏 —— 否则调用方一 print，真值就上了终端。"""
+        hits = reg.pii_scan("联系" + self.phone)
+        self.assertTrue(hits)
+        for _kind, sample in hits:
+            self.assertNotIn(self.phone, sample)
+            self.assertIn("*", sample)
+
+
+class TestDistCheckGate(unittest.TestCase):
+    """分发前扫描器本身的可信度：覆盖面必须完整，否则不得判「可以分发」。"""
+
+    def setUp(self):
+        import dist_check
+        self.dc = dist_check
+
+    def test_all_tracked_files_are_readable(self):
+        files = self.dc.tracked_files()
+        self.assertTrue(files)
+        unread = [p for p in files
+                  if not p.lower().endswith(self.dc.SKIP_SUFFIX)
+                  and self.dc.read_lines(os.path.join(ROOT, p)) is None]
+        self.assertEqual(unread, [], "有入库文件读不到，扫描覆盖面不完整")
+
+    def test_no_git_escaped_paths(self):
+        """`git ls-files` 默认会把中文路径转义成八进制串。"""
+        bad = [p for p in self.dc.tracked_files() if p.startswith('"')]
+        self.assertEqual(bad, [])
+
+    def test_placeholder_rules(self):
+        self.assertTrue(self.dc.is_placeholder_mobile("13800000000"))
+        self.assertTrue(self.dc.is_placeholder_mobile("13333333333"))
+        self.assertFalse(self.dc.is_placeholder_mobile("138" + "12345678"))
+        self.assertTrue(self.dc.is_placeholder_email("a@example.com"))
+        self.assertFalse(self.dc.is_placeholder_email("a" + chr(64) + "qq.com"))
+
+    def test_repo_itself_passes(self):
+        fails, _ = self.dc.check(verbose=False)
+        self.assertEqual(fails, [], "本仓库自身未通过分发扫描：%s" % fails[:3])
+
+
+class TestMappingSafety(unittest.TestCase):
+    """识别引擎的两条安全阀：泛化短标签拒写、值域别名救回。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rules = core.load_rules()
+        cls.index = core.build_index(cls.rules)
+
+    def test_generic_labels_are_refused(self):
+        # 原实现会把它们静默填错（日期→加入党派时间、状态→健康状况…）
+        for lab in ("日期", "时间", "状态", "性质", "方式", "请选择", "请选择日期"):
+            key, how = core.map_one(lab, self.index, self.rules)
+            self.assertIsNone(key, "泛化标签「%s」不该被映射（会静默填错）" % lab)
+
+    def test_exact_labels_still_work(self):
+        for lab in ("备注", "成绩", "姓名", "专业", "岗位"):
+            key, how = core.map_one(lab, self.index, self.rules)
+            self.assertTrue(key, "精确标签「%s」被误拦了" % lab)
+            self.assertEqual(how, "exact")
+
+    def test_strict_refuses_ties(self):
+        """并列最长 ⇒ 歧义 ⇒ 拒写（原先按书写顺序先到先得 = 掷骰子）。"""
+        fields = [
+            {"键": "紧急联系人", "标签": ["紧急联系人"]},   # 5 字
+            {"键": "联系人电话", "标签": ["联系人电话"]},   # 也是 5 字
+        ]
+        idx = core.build_index(fields)
+        key, how = core.map_one_strict("紧急联系人电话", idx, fields)
+        self.assertIsNone(key)
+        self.assertEqual(how, "ambiguous")
+
+    def test_strict_unique_longest_still_wins(self):
+        """只有一个最长候选时不算歧义，正常返回。"""
+        fields = [
+            {"键": "电话", "标签": ["电话"]},
+            {"键": "紧急联系人电话", "标签": ["紧急联系人电话"]},
+        ]
+        idx = core.build_index(fields)
+        key, how = core.map_one_strict("紧急联系人电话", idx, fields)
+        self.assertEqual(key, "紧急联系人电话")
+
+    def test_value_alias_rescue(self):
+        self.assertEqual(core.match_option("本科", ["大学本科", "硕士"]), "大学本科")
+        self.assertEqual(core.match_option("硕士", ["本科", "硕士研究生"]), "硕士研究生")
+        self.assertIsNone(core.match_option("不存在的值", ["甲", "乙"]))
+
+    def test_canonical_value(self):
+        self.assertEqual(core.canonical_value("大学本科"), "本科")
+        self.assertEqual(core.canonical_value("火星语"), "火星语")
+
+    def test_all_rule_keys_are_strings(self):
+        for f in self.rules:
+            self.assertIsInstance(f["键"], str)
+            self.assertTrue(f["键"].strip())
+
+
+class TestUrlGate(unittest.TestCase):
+    """URL 门禁：程序要把真实信息写进这个页面，所以必须挑地方。"""
+
+    def test_public_http_passes(self):
+        for u in ("https://job.iguopin.com/x", "http://www.51job.com/a"):
+            self.assertTrue(core.url_gate(u)[0], u)
+
+    def test_dangerous_schemes_blocked(self):
+        for u in ("file:///C:/secret.txt", "javascript:alert(1)",
+                  "data:text/html,x", "ftp://x.com"):
+            self.assertFalse(core.url_gate(u)[0], u)
+
+    def test_internal_addresses_blocked(self):
+        for u in ("http://127.0.0.1:8000/", "http://localhost/x",
+                  "http://192.168.1.5/", "http://10.0.0.1/", "http://169.254.1.1/"):
+            self.assertFalse(core.url_gate(u)[0], u)
+
+    def test_allow_local_escape_hatch(self):
+        self.assertTrue(core.url_gate("http://127.0.0.1:8000/", allow_local=True)[0])
+
+    def test_empty_and_hostless(self):
+        self.assertFalse(core.url_gate("")[0])
+        self.assertFalse(core.url_gate("https://")[0])
+
+
+class TestResumeRegexCost(unittest.TestCase):
+    """
+    邮箱正则必须**有界**：原实现 O(N²)，4 万字 4.2 秒、12 万字 37.8 秒，
+    一份长简历能把本机拖死。
+    """
+
+    def test_long_text_is_fast(self):
+        import re
+        import time
+        rx = dict(import_resume.PATTERNS)["电子邮箱"]
+        s = "x" * 200_000          # 最坏情形：整段词字符、无 @
+        t0 = time.time()
+        rx.search(s)
+        cost = time.time() - t0
+        self.assertLess(cost, 1.0, "邮箱正则仍然过慢：%.2fs ⇒ 有二次回溯" % cost)
+
+    def test_regex_still_matches(self):
+        rx = dict(import_resume.PATTERNS)["电子邮箱"]
+        m = rx.search("联系我：" + "zhangsan" + chr(64) + "example.com")
+        self.assertTrue(m)
+
+
+class TestBudgetExitCode(unittest.TestCase):
+    """预算停手必须以退出码 5 反映出来，不能被收尾保险丝污染成 0。"""
+
+    def test_fill_form_selftest_passes(self):
+        import subprocess
+        rc = subprocess.call([sys.executable,
+                              os.path.join(ROOT, "scripts", "fill_form.py"),
+                              "--selftest"],
+                             stdout=subprocess.DEVNULL)
+        self.assertEqual(rc, 0, "fill_form 自测未通过")
+
+    def test_stop_reason_maps_to_5(self):
+        """`run()` 里最终退出码的算法：有停止原因 ⇒ 5。"""
+        import inspect
+        import fill_form
+        src = inspect.getsource(fill_form.run)
+        self.assertIn('return 5 if reason else 0', src)
+
+
+class TestInboxResilience(unittest.TestCase):
+    """Issue 正文完全不可信（公开仓库，任何人能提）。"""
+
+    def test_malformed_json_is_friendly(self):
+        import subprocess
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
+                                         encoding="utf-8") as fh:
+            fh.write('{"a": [1,2,')
+            bad = fh.name
+        try:
+            r = subprocess.run(
+                [sys.executable, os.path.join(ROOT, "scripts", "inbox.py"),
+                 "--from-file", bad],
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("不是合法 JSON", r.stdout)
+            self.assertNotIn("Traceback", r.stderr)
+        finally:
+            os.unlink(bad)
+
+    def test_oversized_body_is_truncated(self):
+        huge = "| 字段标签 | " + "长" * 999999 + " |\n"
+        item, _ = inbox.to_item({"number": 1, "title": "t", "body": huge})
+        self.assertLessEqual(len(item["现象"]), 200)
+
+    def test_body_injection_cannot_forge_record(self):
+        """正文里塞换行 + 伪 JSON，不能变成一条新记录。"""
+        body = ("| 字段标签 | 手机* |\n"
+                "\n"
+                '{"id":"Q-19700101-001","现象":"伪造"}\n')
+        item, _ = inbox.to_item({"number": 2, "title": "t", "body": body})
+        self.assertNotIn("\n", item["现象"])
+        self.assertNotIn("Q-19700101-001", json.dumps(item, ensure_ascii=False))
+
+
+class TestFixturePageMapping(unittest.TestCase):
+    """
+    离线端到端：拿仓库自带的模拟网申页 `fixtures/模拟网申页.html` 走一遍完整映射。
+
+    意义：`fill_form.py` 的正经验证需要浏览器（playwright），而大多数环境不装。
+    这里用标准库 `html.parser` 复刻 JS 扫描器的取标签口径，
+    让「取标签 → 映射 → 分类」这条链**在任何机器上都能回归**，
+    而且能钉住「示例档案键改名后，真实页面标签还认不认」这件事。
+    """
+
+    class _Scan(HTMLParser):
+        SKIP = ("hidden", "submit", "button", "image", "reset")
+
+        def __init__(self):
+            super().__init__()
+            self.forlabels, self.bare, self.ctrls = {}, [], []
+            self._lb, self._buf, self._has_ctrl = None, [], False
+
+        def handle_starttag(self, tag, attrs):
+            d = dict(attrs)
+            if tag == "label":
+                self._lb, self._buf, self._has_ctrl = (d.get("for") or ""), [], False
+            elif tag in ("input", "select", "textarea"):
+                self._has_ctrl = True
+                self.ctrls.append((tag, d))
+
+        def handle_data(self, data):
+            if self._lb is not None:
+                self._buf.append(data)
+
+        def handle_endtag(self, tag):
+            if tag == "label" and self._lb is not None:
+                txt = "".join(self._buf).strip()
+                if not self._has_ctrl:
+                    if self._lb:
+                        self.forlabels.setdefault(self._lb, txt)
+                    else:
+                        self.bare.append(txt)
+                self._lb = None
+
+    @classmethod
+    def setUpClass(cls):
+        import fill_form
+        cls.ff = fill_form
+        path = os.path.join(ROOT, "fixtures", "模拟网申页.html")
+        p = cls._Scan()
+        with open(path, encoding="utf-8") as fh:
+            p.feed(fh.read())
+
+        cls.fields, idx = [], 0
+        for tag, d in p.ctrls:
+            t = (d.get("type") or ("select" if tag == "select" else tag)).lower()
+            if t in cls._Scan.SKIP:
+                continue
+            lab = (p.forlabels.get(d.get("id", ""), "")
+                   or d.get("aria-label", "") or "")
+            if t in ("radio", "checkbox") and not lab:
+                lab = p.bare[0] if p.bare else ""
+            cls.fields.append({"idx": idx, "label": lab.strip(), "type": t,
+                               "name": d.get("name", ""), "id": d.get("id", ""),
+                               "options": None, "visible": True,
+                               "inForm": True, "readonly": False})
+            idx += 1
+
+        cls.rules = core.load_rules()
+        cls.index = core.build_index(cls.rules)
+        cls.profile = core.load_profile(
+            os.path.join(ROOT, "fixtures", "档案_示例.json"))
+        cls.plan, cls.gates, cls.unmatched, cls.notes = cls.ff.plan_mapping(
+            cls.fields, [x["label"] for x in cls.fields],
+            cls.profile, cls.index, cls.rules)
+
+    def _key_of(self, label):
+        """按归一化后的标签找（页面上带必填星号，如「应聘岗位*」）。"""
+        target = core.norm(label)
+        for p in self.plan:
+            if core.norm(p["label"]) == target:
+                return p["key"]
+        return None
+
+    def test_page_has_fields(self):
+        self.assertGreaterEqual(len(self.fields), 20)
+
+    def test_nothing_unmatched(self):
+        """模拟页里的每个数据字段都该被认出来 —— 这条链不许有洞。"""
+        self.assertEqual([f["label"] for f in self.unmatched], [])
+
+    def test_renamed_example_keys_still_match_real_labels(self):
+        """示例档案改键名后，真实页面标签（户籍所在地 / 英语等级 / 应聘岗位）仍要认。"""
+        self.assertEqual(self._key_of("户籍所在地"), "户籍")
+        self.assertEqual(self._key_of("英语等级"), "外语水平")
+        self.assertEqual(self._key_of("应聘岗位"), "意向岗位")
+        self.assertEqual(self._key_of("期望城市"), "意向城市")
+        self.assertEqual(self._key_of("手机号码*"), "手机号")
+
+    def test_human_gates_are_detected(self):
+        """密码 / 验证码 / 上传框必须进人工门 —— 程序永不代填。"""
+        labels = " ".join(g["label"] for g in self.gates)
+        for must in ("登录密码", "验证码", "上传简历"):
+            self.assertIn(must, labels, "人工门漏了 %s" % must)
+
+    def test_priority_order_puts_name_first(self):
+        """字段优先级生效：高频字段排在最前（预算到点时先填的就是它）。"""
+        first = [p["key"] for p in self.plan if p["状态"] == "待填"][:1]
+        self.assertEqual(first, ["姓名"], first)
 
 
 if __name__ == "__main__":

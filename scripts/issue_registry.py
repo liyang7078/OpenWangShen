@@ -49,6 +49,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ASSETS = os.path.join(HERE, "..", "assets")
@@ -75,19 +76,73 @@ PII_PATTERNS = (
     ("邮箱", re.compile(r"[\w.+-]+@[\w-]+\.[A-Za-z]{2,}")),
     ("身份证", re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)")),
     ("银行卡", re.compile(r"(?<!\d)\d{16,19}(?!\d)")),
-    ("本机绝对路径", re.compile(r"[A-Za-z]:[\\/](?:Users|users|home)?[\\/]?")),
+    ("本机绝对路径", re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]")),
     ("用户目录路径", re.compile(r"/(?:Users|home)/[A-Za-z0-9_.-]+/")),
 )
+
+# 逐字扫描（不压缩）时用的形态：这些一旦被压缩就会失去可辨识边界
+PII_RAW = (
+    ("邮箱", re.compile(r"[\w.+-]+@[\w-]+\.[A-Za-z]{2,}")),
+    ("本机绝对路径", re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]")),
+    ("用户目录路径", re.compile(r"/(?:Users|home)/[A-Za-z0-9_.-]+/")),
+    # 详细住址：必须同时出现「区/县/镇/乡」+ 门牌数字 + 「号/弄/栋/幢/单元/室」
+    # 才判定为真实地址 —— 只有区县名（如「历下区」）不算，避免误杀字段名
+    ("详细住址", re.compile(
+        r"[\u4e00-\u9fa5]{1,12}(?:区|县|镇|乡)"
+        r"[\u4e00-\u9fa5\d]{0,24}?\d{1,5}\s*(?:号|弄|栋|幢|单元|室)")),
+)
+
+# 压缩（去空白/连字符/点号）**之后**再扫的形态：
+# 这一组专治全角（１３８…）与分隔符变形（138 0013 8000）
+PII_SQUEEZED = (
+    ("手机号", re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")),
+    ("身份证", re.compile(r"(?<![0-9Xx])\d{17}[\dXx](?![0-9Xx])")),
+    ("银行卡", re.compile(r"(?<!\d)\d{16,19}(?!\d)")),
+)
+
+_SEP_RE = re.compile(r"[\s\u3000\-_.·・—–~]")
+
 # 结构上禁止出现的键（万一有人把带真值的报告整段塞进来）
 FORBIDDEN_KEYS = ("填写结果", "回读", "附件结果", "档案值", "profile", "本机档案")
 
 
+def _squeeze(text):
+    """
+    NFKC 归一 + 去分隔符。
+    「１３８００１３８０００」「138 0013 8000」「138-0013-8000」→ 同一个形态。
+    """
+    t = unicodedata.normalize("NFKC", text or "")
+    return _SEP_RE.sub("", t)
+
+
+def _mask(value):
+    """
+    脱敏展示：只留首尾各 1 个字符。
+    **绝不把命中值原样返回** —— 否则调用方一 print，真值就上了终端。
+    """
+    v = value or ""
+    if len(v) <= 2:
+        return "*" * len(v)
+    return "%s%s%s" % (v[0], "*" * (len(v) - 2), v[-1])
+
+
 def pii_scan(text):
-    """扫「值形态」的隐私。返回 [(类型, 命中片段)]。"""
+    """
+    扫「值形态」的隐私。返回 [(类型, 脱敏样本)]。
+
+    两轮扫描：
+      ① 原样  —— 邮箱 / 路径 / 详细住址（有边界语义，压缩会破坏）
+      ② 压缩后 —— 手机号 / 身份证 / 银行卡（治全角与空格/连字符变形）
+    """
+    raw = unicodedata.normalize("NFKC", text or "")
+    sq = _squeeze(text)
     hits = []
-    for name, rx in PII_PATTERNS:
-        for m in rx.finditer(text or ""):
-            hits.append((name, m.group(0)))
+    for name, rx in PII_RAW:
+        for m in rx.finditer(raw):
+            hits.append((name, _mask(m.group(0))))
+    for name, rx in PII_SQUEEZED:
+        for m in rx.finditer(sq):
+            hits.append((name, _mask(m.group(0))))
     return hits
 
 
@@ -276,8 +331,9 @@ def do_add(items, obj, path=ISSUES, today=None):
     ok, msgs, bak = save_issues(items, path)
     if not ok:
         print("[ERR] 零真值反证失败 —— **中止，不写盘**：")
+        # 只打印类型与脱敏样本（pii_scan 已脱敏）—— 绝不回显原值
         for k, v in msgs[:10]:
-            print("   - %s：%r" % (k, v))
+            print("   - %s：%s" % (k, v))
         return 3, ""
     print("[OK] 已登记 %s%s" % (obj["id"], "（已备份 %s）" % bak if bak else ""))
     return 0, obj["id"]
@@ -299,8 +355,9 @@ def do_set_status(items, qid, new, path=ISSUES):
     ok, msgs, bak = save_issues(items, path)
     if not ok:
         print("[ERR] 零真值反证失败 —— **中止，不写盘**：")
+        # 只打印类型与脱敏样本（pii_scan 已脱敏）—— 绝不回显原值
         for k, v in msgs[:10]:
-            print("   - %s：%r" % (k, v))
+            print("   - %s：%s" % (k, v))
         return 3, ""
     print("[OK] %s：%s → %s%s" % (qid, cur, new, "（已备份）" if bak else ""))
     return 0, new

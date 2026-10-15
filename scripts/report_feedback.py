@@ -38,6 +38,7 @@ import datetime
 import json
 import os
 import platform
+from urllib.parse import quote
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -49,9 +50,23 @@ OUT_DIR = os.path.join(ROOT, "feedback_out")
 
 REPO = "liyang7078/OpenWangShen"
 ISSUE_NEW = "https://github.com/%s/issues/new" % REPO
+CHANNEL_FILE = os.path.join(ROOT, "assets", "反馈渠道.json")
 
 SYSTEMS = ("北森", "Moka", "大易", "智联", "其他", "不知道")
 RESULTS = ("未命中", "映射到了错误的键", "选项对不上", "其他")
+
+
+def feedback_email():
+    """
+    读 assets/反馈渠道.json 里的「反馈邮箱」。
+    没配就返回空 —— **不编造地址**；此时只保留 GitHub Issue 通道。
+    """
+    try:
+        with open(CHANNEL_FILE, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return str(d.get("反馈邮箱") or "").strip()
+    except (OSError, ValueError):
+        return ""
 
 # 结果 → 严重度（预判，最终由作者在试验阶段复核）
 SEVERITY = {
@@ -235,6 +250,9 @@ def main(argv=None):
     ap.add_argument("--from-report", default="", help="从填表报告 JSON 取未命中字段")
     ap.add_argument("--save", action="store_true", help="另存一份 JSON 到本机")
     ap.add_argument("--out", default="", help="JSON 输出路径（配合 --save）")
+    ap.add_argument("--mailto", action="store_true",
+                    help="额外给一条「一键邮件」链接（零 GitHub 账号通道）")
+    ap.add_argument("--to", default="", help="覆盖反馈邮箱（默认读 assets/反馈渠道.json）")
     ap.add_argument("--selftest", action="store_true", help="自测")
     args = ap.parse_args(argv)
 
@@ -302,7 +320,7 @@ def main(argv=None):
     if not ok:
         print("\n[ERR] 隐私反证失败 —— **已中止，未输出**：")
         for k, v in msgs[:10]:
-            print("   - %s：%r" % (k, v))
+            print("   - %s：%s" % (k, v))          # 已是脱敏样本，不回显原值
         return 3
 
     print("\n" + "=" * 64)
@@ -311,7 +329,23 @@ def main(argv=None):
     print(text)
     print("=" * 64)
     print("提交地址：%s" % ISSUE_NEW)
-    print("（需要 GitHub 账号。没有账号的话，把上面这段发给项目作者也行。）")
+    print("（这条要 GitHub 账号。）")
+
+    # ---- 零账号通道：一键邮件 ----
+    addr = (args.to or feedback_email()).strip()
+    if args.mailto or addr:
+        if addr:
+            subj = "[字段] %s 未被识别" % (payload.get("字段标签") or "未知字段")
+            url = "mailto:%s?subject=%s&body=%s" % (
+                addr, quote(subj), quote(text))
+            print("\n没有 GitHub 账号？用这条 —— 会打开你的邮件客户端，正文已填好：")
+            print(url[:200] + ("…" if len(url) > 200 else ""))
+            if args.mailto:
+                print("（把上面整行复制到浏览器地址栏打开即可）")
+        else:
+            print("\n[提示] 本项目尚未配置反馈邮箱，零账号通道暂时不可用。")
+            print("       作者可在 assets/反馈渠道.json 填入「反馈邮箱」后自动启用。")
+            print("       在此之前，可把上面那段文字直接发给项目作者。")
     if saved:
         print("本机另存了一份：%s" % os.path.basename(saved))
     return 0

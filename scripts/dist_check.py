@@ -20,9 +20,28 @@ dist_check.py · 分发前「真实值」扫描器
 4. **人属性**  ：规则类文件（`assets/` · `sites/`）里出现第一人称或数值型个人属性
 
 **判据 2 是最硬的一条** —— 只有它能区分「文档里的假样例」与「真人数据」。
-3 / 4 两条给 WARN：它们无法区分示例与真值，只能提示人工看一眼。
-判据 3 会跳过 `fixtures/档案_示例.json` 里的**官方假值**，
-否则示例文档的 WARN 会把真信号淹没。
+判据 3 会跳过 `fixtures/档案_示例.json` 里的**官方假值**与常见的
+**占位符**（`example.com` 域名、连号手机号），否则文档里的假样例会淹没真信号。
+
+判据 3 的定级（2026-10-15 修订）
+-------------------------------
+| 命中 | 定级 | 理由 |
+|---|---|---|
+| 校验位**合法**的 18 位身份证 | **FAIL** | 校验位合法几乎不可能是随手编的 |
+| 非占位符的 11 位手机号 | **FAIL** | 同上 |
+| 非占位符的邮箱 | **FAIL** | 同上 |
+| 规则文件里的人属性 | WARN | 无法区分「示例文案」与真值 |
+
+> 修订前 3/4 两条一律 WARN ⇒ **真值出现也只算"警告"，照样判"可以分发"**。
+> 那是 fail-open，与本项目的隐私承诺相反。现在改为 fail-closed。
+
+覆盖率也是判据的一部分（2026-10-15 修订）
+----------------------------------------
+`git ls-files` 默认把非 ASCII 路径转义成八进制串（`core.quotepath=true`），
+用它拼路径必然 `OSError` ⇒ 文件被**静默跳过**。实测 46 个入库文件只读到 28 个，
+被跳过的恰恰是 `docs/隐私设计.md`、`fixtures/档案_示例.json`、`assets/*`。
+⇒ 现在改用 `git -c core.quotepath=false ls-files -z`，
+  并在**有文件读不到**时直接判「无法判定」，**绝不打印"可以分发"**。
 
 设计约束
 --------
@@ -77,6 +96,30 @@ EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[A-Za-z]{2,}")
 ID_W = (7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2)
 ID_C = "10X98765432"
 
+# 占位符白名单：文档与示例里**合法**出现的假值形态。
+# 只放行「一眼是编的」的东西；其余一律按真值处理（fail-closed）。
+PLACEHOLDER_DOMAINS = ("example.com", "example.org", "example.net",
+                       "example.edu", "example.cn", "example",
+                       "test.com", "invalid", "localhost")
+FAKE_MOBILES = frozenset((
+    "13800000000", "13800138000", "13900000000", "13000000000",
+    "15000000000", "18600000000", "18888888888", "13333333333",
+))
+
+
+def is_placeholder_mobile(v):
+    """明显是人造的手机号（全零尾 / 连号 / 常见测试号）。"""
+    if v in FAKE_MOBILES:
+        return True
+    # 区号后 8 位里出现 ≥7 个连续相同数字 ⇒ 人造
+    return bool(re.search(r"(\d)\1{6,}", v[3:]))
+
+
+def is_placeholder_email(v):
+    """占位域名（example.com 等）不算真值。"""
+    dom = v.rsplit("@", 1)[-1].strip().lower()
+    return any(dom == d or dom.endswith("." + d) for d in PLACEHOLDER_DOMAINS)
+
 # ── 判据 4：人属性 ────────────────────────────────────────────
 RULE_FILE_RE = re.compile(r"^(assets|sites)/")
 PERSON_MARKERS = ("本人", "我的", "我叫", "我于", "我毕", "我毕业")
@@ -86,6 +129,35 @@ NUMERIC_ATTR_RE = re.compile(r"(年龄|分数|成绩|GPA|排名)\"?\s*[:：=]\s*
 
 SKIP_SUFFIX = (".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".zip",
                ".pyc", ".woff", ".woff2", ".ttf")
+
+# 元数据块：这些顶层对象装的是**词表/层号/词表说明**，不是任何人的属性。
+# 不排除的话，「字段优先级」里的 `"专业排名": 2` 会被判成人属性 —— 假警报。
+# 假警报的代价很实在：喊多了，真信号就没人看了。
+METADATA_BLOCKS = ("字段优先级", "值域别名", "忽略", "_指纹词表", "_统计",
+                   "_记录组", "_清单排除", "_约定", "_说明")
+
+
+def metadata_lines(lines, rel):
+    """
+    找出「元数据块」占用的行号集合（只对 .json 生效）。
+    判据 4（人属性）跳过这些行；判据 3（结构模式）仍然全程生效。
+    """
+    if not rel.lower().endswith(".json"):
+        return set()
+    skip = set()
+    i, n = 0, len(lines)
+    while i < n:
+        m = re.match(r'\s*"([^"]+)"\s*:\s*\{\s*$', lines[i])
+        if m and m.group(1) in METADATA_BLOCKS:
+            depth, j = 1, i + 1
+            while j < n and depth > 0:
+                depth += lines[j].count("{") - lines[j].count("}")
+                j += 1
+            skip.update(range(i + 1, j + 1))
+            i = j
+            continue
+        i += 1
+    return skip
 
 
 def id_checksum_ok(v):
@@ -106,10 +178,15 @@ def tracked_files():
     git 不可用时退回遍历目录。
     """
     try:
-        r = subprocess.run(["git", "ls-files"], cwd=core.PROJECT_ROOT,
-                           capture_output=True, text=True, encoding="utf-8")
-        if r.returncode == 0 and r.stdout.strip():
-            return [p.replace("\\", "/") for p in r.stdout.splitlines() if p.strip()]
+        # -c core.quotepath=false ：否则非 ASCII 路径会被转义成
+        #   "docs//345/255/227/..." 这类八进制串，拼成路径必然读不到。
+        # -z ：以 \0 分隔，彻底绕开引号转义。
+        r = subprocess.run(
+            ["git", "-c", "core.quotepath=false", "ls-files", "-z"],
+            cwd=core.PROJECT_ROOT, capture_output=True, text=True,
+            encoding="utf-8")
+        if r.returncode == 0 and r.stdout.strip("\0 \r\n"):
+            return [p.replace("\\", "/") for p in r.stdout.split("\0") if p.strip()]
     except OSError:
         pass
 
@@ -197,6 +274,7 @@ def check(profile=None, verbose=True):
     """
     fails, warns = [], []
     files = tracked_files()
+    unreadable, skipped_bin = [], []
 
     # 判据 1
     for rel in files:
@@ -212,11 +290,19 @@ def check(profile=None, verbose=True):
     fake = documented_fake_values()
 
     for rel in files:
-        lines = read_lines(os.path.join(core.PROJECT_ROOT, rel))
+        full = os.path.join(core.PROJECT_ROOT, rel)
+        lines = read_lines(full)
         if lines is None:
+            # 区分「按后缀主动跳过的二进制」与「本该读到却读不到」。
+            # 后者是扫描覆盖面缺口，必须计数 —— 修订前这里静默 continue。
+            if full.lower().endswith(SKIP_SUFFIX):
+                skipped_bin.append(rel)
+            else:
+                unreadable.append(rel)
             continue
 
         is_rule_file = bool(RULE_FILE_RE.match(rel))
+        meta_lines = metadata_lines(lines, rel) if is_rule_file else set()
 
         for i, line in enumerate(lines, 1):
             # 判据 2
@@ -224,22 +310,22 @@ def check(profile=None, verbose=True):
                 if val in line:
                     fails.append(("值等同", rel, i, "与档案字段「%s」的值完全一致" % field))
 
-            # 判据 3（跳过官方假值，否则示例文档会淹没真信号）
+            # 判据 3（跳过官方假值 + 常见占位符；命中即 FAIL，不再只 WARN）
             for m in ID_RE.finditer(line):
                 if m.group(1) not in fake and id_checksum_ok(m.group(1)):
-                    warns.append(("结构模式", rel, i, "校验位合法的 18 位身份证"))
+                    fails.append(("结构模式", rel, i, "校验位合法的 18 位身份证"))
                     break
             for m in MOBILE_RE.finditer(line):
-                if m.group(1) not in fake:
-                    warns.append(("结构模式", rel, i, "11 位手机号"))
+                if m.group(1) not in fake and not is_placeholder_mobile(m.group(1)):
+                    fails.append(("结构模式", rel, i, "非占位符的 11 位手机号"))
                     break
             for m in EMAIL_RE.finditer(line):
-                if m.group(0) not in fake:
-                    warns.append(("结构模式", rel, i, "邮箱"))
+                if m.group(0) not in fake and not is_placeholder_email(m.group(0)):
+                    fails.append(("结构模式", rel, i, "非占位符的邮箱"))
                     break
 
-            # 判据 4（只对「必须与人无关」的规则文件生效）
-            if is_rule_file:
+            # 判据 4（只对「必须与人无关」的规则文件生效，且跳过元数据块）
+            if is_rule_file and i not in meta_lines:
                 for mk in PERSON_MARKERS:
                     if mk in line:
                         warns.append(("人属性", rel, i, "规则文件里出现第一人称「%s」" % mk))
@@ -247,13 +333,24 @@ def check(profile=None, verbose=True):
                 if NUMERIC_ATTR_RE.search(line):
                     warns.append(("人属性", rel, i, "规则文件里出现数值型个人属性"))
 
+    # 覆盖面缺口 ⇒ 不得判定「可以分发」（fail-closed）
+    if unreadable:
+        fails.append(("覆盖不全", "（%d 个文件）" % len(unreadable), 0,
+                      "这些入库文件未能读取，扫描不完整，无法判定可分发"))
+
     if verbose:
-        print("扫描入库文件：%d 个" % len(files))
+        print("扫描入库文件：%d 个（读到 %d ／ 跳过二进制 %d ／ **读不到 %d**）"
+              % (len(files), len(files) - len(skipped_bin) - len(unreadable),
+                 len(skipped_bin), len(unreadable)))
         print("官方假值白名单：%d 个（取自 fixtures/档案_示例.json）" % len(fake))
         if profile:
             print("对照档案字段值：%d 个（只用于比对，不打印）" % len(values))
         print()
 
+        for rel in unreadable:
+            print("[读不到] %s" % rel)
+        if unreadable:
+            print()
         for tag, rel, ln, why in fails:
             loc = "%s:%d" % (rel, ln) if ln else rel
             print("[FAIL] %-8s %s" % (tag, loc))
@@ -325,6 +422,29 @@ def selftest():
     assert any(p.search("fixtures/档案_示例.json") for p in PATH_EXEMPT), "示例文件被误拦"
     assert not any(p.search("profile.json") for p in PATH_EXEMPT), "profile.json 被误放行"
     print("【自测 6】路径规则与白名单 ✓")
+
+    # 判据 3 定级：占位符放行、疑似真值必拦（2026-10-15 新增）
+    # ⚠️ 探针一律**拼接构造**，绝不写字面量 —— 否则本扫描器会举报自己
+    #    （自测里出现一个像真的手机号，dist_check 就会把它当 FAIL 报出来）
+    probe_mobile = "138" + "12345678"
+    probe_mail = "zhangsan" + chr(64) + "qq" + ".com"
+    assert is_placeholder_mobile("13800000000"), "占位手机号未放行"
+    assert is_placeholder_mobile("13333333333"), "连号手机号未放行"
+    assert not is_placeholder_mobile(probe_mobile), "疑似真值手机号被误放行"
+    assert is_placeholder_email("zhangsan@example.com"), "占位邮箱未放行"
+    assert not is_placeholder_email(probe_mail), "非占位邮箱被误放行"
+    print("【自测 7】判据 3 占位符白名单（真值不会被放行）✓")
+
+    # 覆盖面：中文路径必须真的被读到 —— 这是 quotepath 修复的反证（2026-10-15 新增）
+    files = tracked_files()
+    assert files, "tracked_files 为空"
+    quoted = [p for p in files if p.startswith('"') or "/3" in p[:40]]
+    assert not quoted, "仍有被 git 转义的路径：%s" % quoted[:2]
+    unread = [p for p in files
+              if not p.lower().endswith(SKIP_SUFFIX)
+              and read_lines(os.path.join(core.PROJECT_ROOT, p)) is None]
+    assert not unread, "仍有 %d 个入库文件读不到：%s" % (len(unread), unread[:3])
+    print("【自测 8】入库文件全覆盖：%d 个，无一读不到 ✓" % len(files))
 
     import shutil
     shutil.rmtree(tmp, ignore_errors=True)

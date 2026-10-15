@@ -65,3 +65,9 @@ htmlcov/
 # 的本机文件，不该出现在仓库里（作者侧的反馈走 GitHub Issue，不落本地）。
 反馈_*.json
 feedback_out/
+
+# ---- 接管登录态用的浏览器配置：绝不提交 ----
+# start_browser.py 用独立配置目录开一个可接管的浏览器（--remote-debugging-port）。
+# 该目录里有 **cookies / 登录态 / 会话令牌** —— 泄露等于账号被拿走。
+# 同样放末尾：屏蔽规则只能在末尾生效。
+.browser_profile/

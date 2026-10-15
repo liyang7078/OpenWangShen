@@ -61,14 +61,18 @@ DEFAULT_OUT = os.path.join(ROOT, "profile.json")
 SEP = re.compile(r"[:：\t]")
 
 # 形态正则：不依赖标签，直接按值的样子认
+# ⚠️ 量词必须**有界**。`[\w.+-]+@[\w-]+\.[A-Za-z]{2,}` 在长文本上是 O(N²)：
+#    每个起始位置都会先吞掉一整段词字符再回溯。实测 4 万字 → 4.7 秒，
+#    一份几十万字的简历能把本机拖住数十分钟。改成定界量词后是线性。
 PATTERNS = (
     ("手机号", re.compile(r"(?<!\d)(1[3-9]\d{9})(?!\d)")),
-    ("电子邮箱", re.compile(r"([\w.+-]+@[\w-]+\.[A-Za-z]{2,})")),
+    ("电子邮箱", re.compile(r"([\w.+-]{1,64}@[\w-]{1,63}\.[A-Za-z]{2,24})")),
     ("身份证号", re.compile(r"(?<!\d)(\d{17}[\dXx])(?!\d)")),
 )
 
 MAX_VAL = 120          # 超过这个长度多半不是字段值，是一段话
 MAX_LAB = 20
+MAX_TEXT = 300_000     # 简历文本上限：超出即截断，防止正则/内存拖死本机
 
 
 # --------------------------------------------------------------------------
@@ -271,6 +275,14 @@ def main(argv=None):
     except OSError as exc:
         print("[ERR] 读不了这个文件：%s" % exc)
         return 2
+
+    # 超大文本截断：本工具只认「标签: 值」这类短行，
+    # 第 30 万字之后不可能还是简历字段，继续扫只会白烧 CPU。
+    if len(text) > MAX_TEXT:
+        print("[提示] 简历 %d 字，超过上限 %d 字 —— 只扫前 %d 字。"
+              % (len(text), MAX_TEXT, MAX_TEXT))
+        print("       多半是排版残留（如 PDF 转文本的重复空行）。")
+        text = text[:MAX_TEXT]
 
     got, how = extract(text, fields)
 

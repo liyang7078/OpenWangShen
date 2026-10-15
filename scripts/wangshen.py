@@ -3,7 +3,7 @@
 """
 wangshen.py · OpenWangShen 统一入口
 ====================================
-把六个子工具收进一条命令，避免记一堆脚本名。
+把所有子工具收进一条命令，避免记一堆脚本名。
 
     python scripts/wangshen.py checklist --out 网申信息清单.md     空白问卷（**第一步**）
     python scripts/wangshen.py resume  --in 我的简历.docx          简历导入：本机抽成预填档案
@@ -29,6 +29,18 @@ import os
 import subprocess
 import sys
 
+# Windows 控制台默认编码往往不是 UTF-8（GBK 常见）。
+# 本入口会打印 ⚠️ / ✅ 这类字符 —— 不兜底就会在第一屏直接 UnicodeEncodeError。
+# errors="replace" 保证即便终端不支持也**不崩**，最差显示成问号。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+# 子进程同样继承，避免「入口活了、子脚本崩了」
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
 
@@ -39,6 +51,7 @@ CMDS = {
     "sheet": ("make_sheet.py", "生成填写清单（保底模式，零浏览器依赖）"),
     "sheethtml": ("sheet_html.py", "可复制清单页：点一下就复制的本机网页"),
     "fill": ("fill_form.py", "自动填表：打开岗位页→识别字段→写入（不提交）"),
+    "browser": ("start_browser.py", "开一个可被接管的浏览器（复用登录态，真实站必备）"),
     "mask": ("mask_pii.py", "PII 脱敏：需要 AI 帮忙写开放题时先脱敏"),
     "issue": ("issue_registry.py", "问题库：登记踩过的坑 / 查解法 / 按指纹匹配策略"),
     "trial": ("issue_trial.py", "问题试验：多路径试跑 → 断言择优 → 固化进策略库"),
@@ -84,11 +97,21 @@ OpenWangShen · 推荐使用顺序
             --url <岗位页地址> --dry-run
         看它能不能识别页面字段。识别不了就换第 3 步。
 
+第 2.5 步  页面要求登录？（**真实网申站几乎都要求**——先看这一条）
+        python scripts/wangshen.py browser
+        它会开一个「可被接管」的浏览器。你在那个窗口里**自己登录**，
+        走到「填写简历」那一页，然后：
+        python scripts/wangshen.py fill --profile profile.json \\
+            --url <那个页面的网址> --connect 9222
+        程序接管的只是**页面**，不碰你的账号密码，也不会自己点提交。
+        不这么做，裸开浏览器会直接停在登录页 —— 一个字段都扫不到。
+
 第 3 步  正式填
         python scripts/wangshen.py fill --profile profile.json \\
             --url <岗位页地址> --screenshot filled.png
         程序填完会停下。**附件、志愿顺序、提交由你本人完成。**
         每站默认 300 秒预算：到点、或识别率过低，它自己停手，转下一行。
+        填完会回读一遍核对 —— 写进去又被页面丢掉的，会从「已填」里剔除。
 
 保底路径（第 2、3 步跑不通时 —— **多数人最后都靠这条**）
         python scripts/wangshen.py sheet --profile profile.json \\
@@ -105,6 +128,8 @@ OpenWangShen · 推荐使用顺序
         python scripts/wangshen.py report
         答几个问题，它会生成一段可以直接贴成 Issue 的反馈。
         你踩的坑记下来，下一个人就不用再踩。
+        没有 GitHub 账号？加 --mailto 换一条「一键邮件」的路。
+        两条都没有的话，把生成的那段文字直接发给项目作者也可以。
 
 ────────────────────────────────────────────────────────
 三条不可越过的线
@@ -123,6 +148,8 @@ def selftest():
     for name, args in [
         ("core.py", ["core.py"]),
         ("check_profile.py", ["check_profile.py", "--selftest"]),
+        ("fill_form.py", ["fill_form.py", "--selftest"]),
+        ("start_browser.py", ["start_browser.py", "--selftest"]),
         ("make_sheet.py", ["make_sheet.py", "--selftest"]),
         ("mask_pii.py", ["mask_pii.py", "--selftest"]),
         ("dist_check.py", ["dist_check.py", "--selftest"]),

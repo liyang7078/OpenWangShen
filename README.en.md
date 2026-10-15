@@ -90,6 +90,6 @@ Please comply with the terms of service of any site you use it on.
 
 ## Author
 
-**liyang** · WeChat: `liyang7078`
+**Author: liyang7078**
 
 Issues and pull requests are welcome.

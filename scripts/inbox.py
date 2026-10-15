@@ -52,6 +52,11 @@ DROPPED = os.path.join(ROOT, "feedback_out", "已忽略.json")
 DEFAULT_REPO = "liyang7078/OpenWangShen"
 UA = "OpenWangShen-inbox/1.0 (+https://github.com/%s)" % DEFAULT_REPO
 
+# 抗滥用上界：Issue 正文完全不可信（公开仓库，任何人可提交）
+MAX_BODY = 20_000       # 单条正文上限（超出截断）
+MAX_ISSUES = 300        # 一次最多处理多少条
+MAX_LABEL = 60          # 抽出的字段标签上限
+
 
 # --------------------------------------------------------------------------
 # 拉取
@@ -78,7 +83,8 @@ def fetch_issues(repo=DEFAULT_REPO, timeout=15):
     if not isinstance(data, list):
         return [], "返回格式不是列表"
     # GitHub 把 PR 也当 Issue，按有没有 pull_request 键区分
-    return [x for x in data if isinstance(x, dict) and "pull_request" not in x], ""
+    items = [x for x in data if isinstance(x, dict) and "pull_request" not in x]
+    return items[:MAX_ISSUES], ""
 
 
 # --------------------------------------------------------------------------
@@ -92,23 +98,25 @@ def parse_body(body):
     got = {"字段标签": "", "系统": "", "期望键": "", "实际结果": ""}
     if not body:
         return got
-    for k, v in CELL.findall(body):
+    # 正文不可信：先截断再解析，避免超大 payload 拖死本机
+    text = str(body)[:MAX_BODY]
+    for k, v in CELL.findall(text):
         k, v = k.strip(), (v or "").strip().strip("`").strip()
         if "字段标签" in k:
-            got["字段标签"] = v
+            got["字段标签"] = v[:MAX_LABEL]
         elif "系统" in k and not got["系统"]:
-            got["系统"] = v
+            got["系统"] = v[:40]
         elif "期望映射" in k:
-            got["期望键"] = v
+            got["期望键"] = v[:MAX_LABEL]
         elif "实际结果" in k:
-            got["实际结果"] = v
+            got["实际结果"] = v[:40]
     return got
 
 
 def to_item(issue):
     """Issue → 问题库条目（与 report_feedback.to_issue 同一套映射）。"""
     p = parse_body(issue.get("body") or "")
-    lab = p["字段标签"] or (issue.get("title") or "")[:40]
+    lab = (p["字段标签"] or (issue.get("title") or ""))[:MAX_LABEL]
     res = p["实际结果"] or "未命中"
     sysname = p["系统"] or "不知道"
     sev = {"未命中": "中", "映射到了错误的键": "高",
@@ -279,10 +287,23 @@ def main(argv=None):
         if not os.path.isfile(args.from_file):
             print("[ERR] 找不到文件：%s" % args.from_file)
             return 2
-        with open(args.from_file, "r", encoding="utf-8") as fh:
-            raw = json.load(fh)
+        try:
+            with open(args.from_file, "r", encoding="utf-8") as fh:
+                raw = json.load(fh)
+        except json.JSONDecodeError as e:
+            print("[ERR] 这个文件不是合法 JSON（第 %d 行第 %d 列）：%s"
+                  % (e.lineno, e.colno, e.msg))
+            print("      期望格式：GitHub /issues 接口返回的 JSON 数组。")
+            print("      想自己造几条试试？看 inbox.py --selftest 里的示例。")
+            return 2
+        except OSError as e:
+            print("[ERR] 读不了这个文件：%s" % e)
+            return 2
+        except UnicodeDecodeError:
+            print("[ERR] 这个文件不是 UTF-8 文本（可能是 .zip / .docx 之类）。")
+            return 2
         issues = [x for x in (raw if isinstance(raw, list) else [raw])
-                  if isinstance(x, dict) and "pull_request" not in x]
+                  if isinstance(x, dict) and "pull_request" not in x][:MAX_ISSUES]
         err = ""
     else:
         print("正在读取 %s 的 Issue …" % args.repo)
@@ -341,8 +362,9 @@ def main(argv=None):
         ok, msgs = reg.guard(text, r["item"])
         if not ok:
             print("[ERR] 隐私反证失败 —— **中止，不写盘**：")
+            # 只打印类型与脱敏样本（pii_scan 已脱敏）—— 绝不回显原值
             for k, v in msgs[:10]:
-                print("   - %s：%r" % (k, v))
+                print("   - %s：%s" % (k, v))
             return 3
         rc, qid = reg.do_add(existing, r["item"])
         if rc == 0:

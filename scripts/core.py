@@ -12,7 +12,7 @@ OpenWangShen 核心库
 真实值只在调用方（本地脚本）内部从档案取出、直接交给目标（浏览器或本地文件），
 不经过标准输出，因而不进入任何模型上下文。
 
-作者：liyang（微信：liyang7078）
+作者：liyang7078
 许可：MIT
 """
 
@@ -42,6 +42,10 @@ ATTACH_PREFIX = "附件_"
 _BRACKET_RE = re.compile(r"[（(][^）)]*[)）]")
 _SPACE_RE = re.compile(r"[\s\u3000]+")
 _NOISE = ("*", "：", ":", "、", "，", ",", "?", "？", "!", "！", "-")
+# placeholder 里的提示前缀：「请选择日期」真正想说的是「日期」。
+# 不剥掉的话，「请输入/请选择」这类提示会参与匹配 —— 实测「请选择」会撞上「性别」。
+_PLACEHOLDER_PREFIX_RE = re.compile(
+    r"^(请输入|请选择|请填写|请上传|请注明|请录入|请提供|请选择您的|请输入您的)")
 
 
 def norm(text):
@@ -54,11 +58,33 @@ def norm(text):
     if text is None:
         return ""
     s = str(text).strip()
+    s = _PLACEHOLDER_PREFIX_RE.sub("", s)
     for ch in _NOISE:
         s = s.replace(ch, "")
     s = _BRACKET_RE.sub("", s)
     s = _SPACE_RE.sub("", s)
     return s.lower()
+
+
+# --------------------------------------------------------------------------
+# 泛化短标签黑名单（2026-10-15 新增）
+# --------------------------------------------------------------------------
+# 「日期」这两个字**不指向任何具体字段**。但没有这层保护时，「包含匹配」会把它
+# 撞到标签最长的那个字段上 —— 实测（本机 165 字段词表）：
+#
+#     日期 → 加入党派时间      状态 → 健康状况        性质 → 户籍
+#     时间 → 获得惩罚/处分时间   方式 → 辅导员联系方式   请选择 → 性别
+#
+# 后果比「填不上」严重得多：**填错是看不见的**（页面不报错、程序报"已填"）。
+# 所以这里的判据是**拒写优于填错** —— 宁可交回给考生手填。
+#
+# 只拦「partial（包含匹配）」；「exact（精确相等）」一律放行：
+# 页面字段就叫「备注」「成绩」「姓名」时，精确命中就是对的。
+GENERIC_LABELS = frozenset((
+    "日期", "时间", "名称", "类型", "状态", "性质", "方式", "情况", "原因",
+    "内容", "简介", "描述", "说明", "等级", "分数", "类别", "号码", "其他",
+    "开始", "结束", "年月", "请选择", "请输入", "请填写", "添加", "新增",
+))
 
 
 # --------------------------------------------------------------------------
@@ -129,8 +155,54 @@ def map_one(page_label, index, fields):
     if best_key:
         # 长度 ≥2 才算有效，避免 "名" 这类单字乱命中
         if best_len >= 2:
+            # 泛化短标签不参与包含匹配（见 GENERIC_LABELS 的实测依据）：
+            # 「日期」「状态」这类词撞上谁都是错的，交回人工。
+            if n in GENERIC_LABELS:
+                return None, None
             return best_key, "partial"
     return None, None
+
+
+def map_one_strict(page_label, index, fields):
+    """
+    同 `map_one`，但**匹配不唯一时拒写**（返回 (None, "ambiguous")）。
+
+    为什么另开一个函数
+    ------------------
+    `map_one` 在多个候选里取「标签最长」的那个，看着聪明，其实是**掷骰子**：
+    若两个不同字段的标签并列最长，谁先声明谁赢 —— 结果取决于规则库的书写顺序，
+    同一页面换个版本就可能填错。这里把「并列」显式判为歧义，交回人工。
+
+    实测收益：把「拒写优于填错」落成代码，而不是只写在文档里。
+    """
+    n = norm(page_label)
+    if not n or len(n) < 2:
+        return None, None
+    # 精确命中优先：页面字段就叫「备注」「成绩」时，精确相等就是对的
+    if n in index:
+        return index[n], "exact"
+    # 只有「模糊匹配」才受泛化黑名单约束
+    if n in GENERIC_LABELS:
+        return None, None
+
+    best = []
+    best_len = 0
+    for item in fields:
+        for label in item.get("标签", []):
+            ln = norm(label)
+            if not ln:
+                continue
+            if (ln in n or n in ln):
+                if len(ln) > best_len:
+                    best_len, best = len(ln), [item["键"]]
+                elif len(ln) == best_len:
+                    best.append(item["键"])
+
+    if best_len < 2 or not best:
+        return None, None
+    if len(set(best)) > 1:
+        return None, "ambiguous"          # 并列最长 ⇒ 拒写
+    return best[0], "partial"
 
 
 def map_fields(page_labels, fields, index=None):
@@ -236,6 +308,214 @@ def value_of(profile, key):
         # 复杂结构不做字符串化猜测，交给调用方
         return v
     return str(v).strip()
+
+
+# --------------------------------------------------------------------------
+# 值域别名（2026-10-15 接线）
+# --------------------------------------------------------------------------
+# 规则库里一直存着 14 组「值域别名」（本科 ↔ 大学本科 / 硕士 ↔ 硕士研究生 …），
+# 但引擎从来没读过 —— 页面下拉里写着「大学本科」，档案里写着「本科」，
+# 匹配不上 ⇒ **静默失败**（看着在填，实际没选中）。这一节把它接上。
+_VA_CACHE = {}
+
+
+def value_aliases(path=None):
+    """
+    读规则库顶层的「值域别名」。
+    返回 {类别: {标准值: [别名, …]}}
+    """
+    p = path or DEFAULT_RULES_PATH
+    if p in _VA_CACHE:
+        return _VA_CACHE[p]
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        va = raw.get("值域别名") or {}
+    except (OSError, ValueError):
+        va = {}
+    _VA_CACHE[p] = va
+    return va
+
+
+_ALIAS_INDEX = {}
+
+
+def _alias_index(path=None):
+    """归一化别名 → 标准值。例：'大学本科' → '本科'。"""
+    key = path or DEFAULT_RULES_PATH
+    if key in _ALIAS_INDEX:
+        return _ALIAS_INDEX[key]
+    idx = {}
+    for _cat, mapping in value_aliases(path).items():
+        if not isinstance(mapping, dict):
+            continue
+        for std, alts in mapping.items():
+            idx.setdefault(norm(std), std)
+            for a in (alts or []):
+                idx.setdefault(norm(a), std)
+    _ALIAS_INDEX[key] = idx
+    return idx
+
+
+def canonical_value(value, path=None):
+    """
+    把档案里的值归一到一个**标准值**。
+    '大学本科' → '本科'；'CET6' 之类不在表里的 → 原样返回。
+    """
+    v = str(value or "").strip()
+    if not v:
+        return ""
+    return _alias_index(path).get(norm(v), v)
+
+
+def option_aliases(value, path=None):
+    """
+    给定标准值，返回它在页面里**所有可能的写法**（含自身）。
+    例：'本科' → {'本科','大学本科','全日制本科','学士','本科生'}
+    """
+    v = str(value or "").strip()
+    if not v:
+        return set()
+    std = canonical_value(v, path)
+    out = {v, std}
+    for _cat, mapping in value_aliases(path).items():
+        if not isinstance(mapping, dict):
+            continue
+        for s, alts in mapping.items():
+            if norm(s) == norm(std) or norm(s) == norm(v):
+                out.add(s)
+                out.update(a for a in (alts or []) if a)
+    return {x for x in out if x}
+
+
+def match_option(value, options, path=None):
+    """
+    在页面**实际选项**里找出与档案值等价的那一个，返回选项原文；找不到返回 None。
+
+    三级（由严到宽）：
+      ① 归一后完全相等
+      ② 命中值域别名（本科 ↔ 大学本科）
+      ③ 互为包含（长度 ≥2，防「男」撞「男装」）
+    """
+    opts = [str(o).strip() for o in (options or []) if str(o or "").strip()]
+    if not opts or not str(value or "").strip():
+        return None
+
+    v = str(value).strip()
+    nv = norm(v)
+    for o in opts:
+        if norm(o) == nv:
+            return o
+
+    alts = option_aliases(v, path)
+    na = {norm(a) for a in alts if norm(a)}
+    for o in opts:
+        if norm(o) in na:
+            return o
+
+    std = norm(canonical_value(v, path))
+    if len(std) >= 2:
+        for o in opts:
+            no = norm(o)
+            if len(no) >= 2 and (no in std or std in no):
+                return o
+    return None
+
+
+# --------------------------------------------------------------------------
+# 字段优先级（2026-10-15 接线）
+# --------------------------------------------------------------------------
+# 规则库顶层带着一张「字段优先级」表（按网申出现频次分层：1 最高，默认 9）。
+# 以前引擎不读它 ⇒ 每站 300 秒预算被低价值字段先吃光，高频字段反而没填上。
+_PRIO_CACHE = {}
+
+
+def field_priority(path=None):
+    """{键: 层号}。层号越小越先填。"""
+    p = path or DEFAULT_RULES_PATH
+    if p not in _PRIO_CACHE:
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            prio = raw.get("字段优先级") or {}
+        except (OSError, ValueError):
+            prio = {}
+        _PRIO_CACHE[p] = {k: v for k, v in prio.items()
+                          if not str(k).startswith("_")}
+    return _PRIO_CACHE[p]
+
+
+def priority_rank(key, path=None):
+    """越小越先填；未列入的排最后。"""
+    try:
+        return int(field_priority(path).get(key))
+    except (TypeError, ValueError):
+        return 999
+
+
+def sort_by_priority(items, key_field="key", path=None):
+    """
+    按字段优先级**稳定**排序（同层保持原有顺序 = 页面顺序）。
+    预算紧张时这一步决定「先填哪些」。
+    """
+    return sorted(items, key=lambda it: priority_rank(it.get(key_field), path))
+
+
+# --------------------------------------------------------------------------
+# URL 门禁（安全）
+# --------------------------------------------------------------------------
+LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1", "0.0.0.0", "[::1]")
+
+
+def url_gate(url, allow_local=False):
+    """
+    填表前的 URL 门禁。返回 (ok, 说明)。
+
+    为什么需要
+    ----------
+    `fill_form --url` 会把**档案里的真值**写进这个页面。若不校验：
+      · `file:///` 能打开本机文件，页面脚本可回读本机路径
+      · `javascript:` / `data:` 可直接执行脚本
+      · 内网地址可被用来探测内网服务
+    更根本的风险是「真值被填进一个不受信任的页面」—— 本函数只做**硬拦截**；
+    信任判断由使用者自己做（终端会再提示一次）。
+
+    `allow_local=True` 时放行本机/内网地址（仅供开发自测）。
+    """
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    raw = str(url or "").strip()
+    if not raw:
+        return False, "URL 为空"
+    try:
+        u = urlsplit(raw)
+    except ValueError as e:
+        return False, "URL 解析失败：%s" % e
+
+    scheme = (u.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        return False, ("只允许 http / https，当前是 %r —— "
+                       "file://、javascript:、data: 一律拒绝" % scheme)
+
+    host = (u.hostname or "").lower()
+    if not host:
+        return False, "URL 缺少主机名"
+    if allow_local:
+        return True, ""
+
+    if (host in LOCAL_HOSTS or host.endswith(".localhost")
+            or host.endswith(".local") or host.endswith(".internal")):
+        return False, "拒绝本机/内网地址：%s（确需自测请加 --allow-local）" % host
+
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return True, ""          # 是域名 ⇒ 交给使用者判断
+    if (ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+        return False, "拒绝内网/保留地址：%s（确需自测请加 --allow-local）" % host
+    return True, ""
 
 
 if __name__ == "__main__":
