@@ -1163,6 +1163,8 @@ def apply_plan(page, plan, fields_by_idx, frames_by_idx=None, deadline=None):
     timed_out = False
     fake = 0                     # 假成功计数（写入返回成功、回读为空/值=标签）
     paneled = 0                  # 靠面板点选才写进去的（自绘日历 / 级联）
+    mismatched = []              # 「填了但值不符」——只提示，不计失败
+    equivalent = []              # 「等价但非逐字」——站点改写的合法形态
     frames_by_idx = frames_by_idx or {}
 
     for item in plan:
@@ -1232,12 +1234,25 @@ def apply_plan(page, plan, fields_by_idx, frames_by_idx=None, deadline=None):
                 failed.append({"label": item["label"],
                                "原因": "回读值等于标签（占位提示，未真正写入）"})
                 continue
+            # ---- 期望值比对（窄口径，2026-10-16 取自 LYSKILL `sameText`）----
+            # 上面三条只证明「填进去了」，证明不了「填对了」。这里补上比对，
+            # 但**只对日期列 + 受控枚举列 + 纯数字**启用（见 _expect_match 理据）。
+            # ⚠ 不符**不算失败**：站点格式化/加限定词都是合法行为，据此报错会把
+            #   误报的代价转嫁给考生。只记一条，交回读页人工过一眼。
+            hit, how = _expect_match(got, item, fields_by_idx.get(item["idx"]))
+            if not hit:
+                mismatched.append({"label": item["label"],
+                                   "期望": item["value"], "实际": got})
+            elif how:
+                # 等价但非逐字（date-eq / num-eq / enum-eq）—— 记下来备复盘，
+                # 不影响「已填」计数：站点改写是合法行为，不是异常。
+                equivalent.append({"label": item["label"], "方式": how})
             filled += 1
         except Exception as e:
             failed.append({"label": item["label"], "原因": friendly_error(e)})
     return {"已填": filled, "失败": failed, "跳过": skipped,
             "假成功": fake, "超时中止": timed_out, "日期补全": adjusted,
-            "面板写入": paneled}
+            "面板写入": paneled, "值不符": mismatched, "等价改写": equivalent}
 
 
 def _fill_choice(frame, sel, item, field):
@@ -1556,6 +1571,107 @@ READ_VALUE_JS = """
 """
 
 
+# ---------------------------------------------------------------------------
+# 期望值比对（窄口径）—— 2026-10-16 取自 LYSKILL `sameText`
+# ---------------------------------------------------------------------------
+# 背景：`_read_back` 的旧判据是「有值 且 ≠ 标签」，它防得住「**没填上**」，
+#   但防不住「**填错了**」—— 值只要非空，不管是不是期望的那个都记「已填」。
+#
+# 为什么**不能**无条件比对：站点会合法改写值，逐字比对必然误报。
+#   实测过的改写形态：`2026-09-22`→`2026/09/22`（换分隔符）、`181`→`181.00`
+#   （数字补位）、选「本科」→回显「全日制本科」（加限定词）。
+#   ⇒ 这三类各自有可穷举的等价形式，可以比对；**自由文本没有**（站点可能截断、
+#     追加说明、转义），逐字比对只会制造假失败。
+#
+# ⇒ 因此定**窄口径**，只对两类列启用：
+#     ① 日期列（`type == "date"`）：归一化成 YYYY-MM-DD 后比。
+#     ② 受控枚举列（该控件的 `options` 非空）：选项文本是闭集，用 `norm` 子串比对。
+#   其余（自由文本）仍只判「非空 且 ≠ 标签」，行为与此前**逐字不变**。
+#
+# 关键：**值不符 ≠ 失败**。比对不通过只记「填了但值不符」，由人工在回读页上
+#   过一眼；**绝不**据此把它归进 `failed` 或 `fake` —— 否则一个站点格式化
+#   就能把整表报成红的，等于把误报的代价转嫁给考生（背景：考生版硬原则 2、3）。
+
+_EXPECT_NUM_RE = re.compile(r"^[0-9]+(\.[0-9]+)?$")
+
+
+def _norm_date_loose(s):
+    """把任意日期写法收敛成 YYYY-MM-DD 的**宽松**归一（比不出年月日就返回 None）。
+
+    与 `_norm_date` 的分工：那个是**写入前**的规范化（要产出确定值，故对缺月
+    缺日做补全、补全了要提示核对）；这个是**回读时**的等价比对（只问"这两个
+    写法是不是同一个日子"，故**绝不补全** —— 补全会让 `2026-07` 与
+    `2026-07-01` 判等，那是把"没填全"放过去）。
+    """
+    s = str(s or "").strip()
+    if not s:
+        return None
+    # 中文/斜杠/点分隔统一成短横；顺手去掉时间部分（`2026-09-22 00:00:00`）
+    s = re.split(r"[\sT]+", s, 1)[0]
+    for ch in ("年", "月", "/", "."):
+        s = s.replace(ch, "-")
+    s = s.rstrip("日").strip("-")
+    parts = [p for p in s.split("-") if p.strip()]
+    if len(parts) != 3:
+        return None
+    try:
+        y, m, d = (int(p) for p in parts)
+    except ValueError:
+        return None
+    # 月份 1-12 且后面不再跟数字 —— 「2019-2023」这种区间会被 split 成两段，
+    #   但「2019-2023-01」会被切成三段且 m=2023 ⇒ 必须靠这条把区间挡掉，
+    #   否则把「起止年份」读成「某年某月」。（同 SOT C23 的教训：判据要卡值域）
+    if not (1 <= m <= 12 and 1 <= d <= 31):
+        return None
+    return "%04d-%02d-%02d" % (y, m, d)
+
+
+def _expect_match(got, item, field):
+    """回读值 `got` 与期望值是否**等价**。返回 (是否等价, 方式 or None)。
+
+    `field` 可缺省（拿不到 option 域时自动降级为"只对日期列启用"）。
+    只认三种等价，**不做任何模糊匹配**：
+      · exact     —— 逐字相等
+      · enum-eq   —— 期望值（归一后）是回读值（归一后）的**子串**。
+                     例：期望「本科」，站点回显「全日制本科」⇒ 命中；
+                     反向（期望「全日制本科」、回显「本科」）**不算**命中 ——
+                     选项域是闭集，站点不会把长选项截成短的。
+      · date-eq   —— 两侧都能解析成日期且是同一日。
+      · num-eq    —— 两侧都是纯数字且数值相等（`181` vs `181.00`）。
+    """
+    want = str(item.get("value") or "")
+    got = str(got or "")
+    if not want or not got:
+        return False, None
+    if got == want:
+        return True, None
+
+    # ① 日期列：type 明确是 date
+    if item.get("type") == "date":
+        a, b = _norm_date_loose(got), _norm_date_loose(want)
+        if a and b and a == b:
+            return True, "date-eq"
+        return False, None
+
+    # ② 数字：只在**两侧都是纯数字**时归一 —— 与 LYSKILL `sameText` 同源。
+    #    非数字字段行为逐字不变，也不可能把「181 vs 1810」判成相等。
+    xa = re.sub(r"[,\s￥¥]", "", got)
+    xb = re.sub(r"[,\s￥¥]", "", want)
+    if _EXPECT_NUM_RE.match(xa) and _EXPECT_NUM_RE.match(xb):
+        if float(xa) == float(xb):
+            return True, "num-eq"
+
+    # ③ 受控枚举列：靠控件自己的选项域判定「这是个闭集控件」。
+    #    拿不到 option 域 ⇒ 不启用（宁可漏一次比对，也不制造一次误报）。
+    opts = (field or {}).get("options") or []
+    if opts:
+        nw = core.norm(want)
+        ng = core.norm(got)
+        if nw and ng and nw in ng:
+            return True, "enum-eq"
+    return False, None
+
+
 def _read_back(frame, idx, kind):
     """
     回读控件当前值。**这是「已填」的唯一判据** ——
@@ -1862,11 +1978,13 @@ def run(args):
         if args.dry_run:
             print("[4/5] --dry-run：不写入任何内容")
             res = {"已填": 0, "失败": [], "跳过": [], "日期补全": [],
-                   "假成功": 0, "超时中止": False}
+                   "假成功": 0, "超时中止": False,
+                   "值不符": [], "等价改写": []}
         elif stop_reason:
             print("[4/5] 已停手，不写入")
             res = {"已填": 0, "失败": [], "跳过": [], "日期补全": [],
-                   "假成功": 0, "超时中止": True, "原因": stop_reason}
+                   "假成功": 0, "超时中止": True, "原因": stop_reason,
+                   "值不符": [], "等价改写": []}
         else:
             print("[4/5] 写入表单（不提交）")
             res = apply_plan(page, plan, fields_by_idx,
@@ -1883,6 +2001,20 @@ def run(args):
                     print("         · %s（%s）" % (f["label"], f["原因"]))
             for a in res.get("日期补全", []):
                 print("      ⚠️ %s：%s" % (a["label"], a["说明"]))
+            # ---- 「填了但值不符」（2026-10-16 · 窄口径期望值比对）----
+            # 与「假成功」分开：假成功＝没写进去（已从「已填」剔除）；
+            #   值不符＝写进去了、但不是期望的那个值。**仍算已填**，只提示。
+            for m in res.get("值不符", [])[:8]:
+                print("      · %s：期望「%s」，页面实际「%s」—— 请回读页核一眼"
+                      % (m["label"], m["期望"], m["实际"]))
+            if res.get("值不符"):
+                report["值不符"] = res["值不符"]
+                print("      （共 %d 项值不符，不计失败 —— 站点可能自行格式化/加限定词）"
+                      % len(res["值不符"]))
+            if res.get("等价改写"):
+                print("      （另有 %d 项是「等价改写」：%s —— 站点合法格式化，非异常）"
+                      % (len(res["等价改写"]),
+                         "、".join(sorted({e["方式"] for e in res["等价改写"]}))))
             if res.get("超时中止"):
                 report["停止原因"] = "填写途中到点（%d 秒）" % args.budget
                 print("      ⚠️ %s —— 已停手" % report["停止原因"])
@@ -2240,6 +2372,49 @@ def selftest():
           _its == [{"k": 0, "text": "a"}] and LAST_PANEL_GATE["闸门生效"] is False
           and _panel_items(_PF(boom=True)) == [],
           (_its, LAST_PANEL_GATE))
+
+    # ---- 期望值比对（窄口径）· 2026-10-16 ----
+    # 这一组判据卡的是「**行为**」，不是「源码里有没有这个词」——
+    # 反证（㊿ 之后带"反证"二字的）全部是**必须判否**的用例，
+    # 它们才是防误报的本体：只测"能判等"会放过"什么都判等"的坏实现。
+    def _m(got, val, typ="text", opts=None):
+        return _expect_match(
+            got, {"value": val, "type": typ, "label": "x"},
+            {"options": opts} if opts is not None else {})
+
+    check("㊿ 逐字相等 → 命中", _m("本科", "本科")[0] is True)
+    check("① 日期改写：`2026-09-22` ↔ `2026/09/22` 判等（站点换分隔符）",
+          _m("2026/09/22", "2026-09-22", "date") == (True, "date-eq"))
+    check("② 日期改写：`2026年9月22日` 也判等",
+          _m("2026年9月22日", "2026-09-22", "date")[0] is True)
+    check("③ 日期带时间尾（`2026-09-22 00:00:00`）判等",
+          _m("2026-09-22 00:00:00", "2026-09-22", "date")[0] is True)
+    check("④ 数字补位：`181` ↔ `181.00` 判等（LYSKILL `sameText` 同源）",
+          _m("181.00", "181") == (True, "num-eq"))
+    check("⑤ 千分位：`1,234` ↔ `1234` 判等",
+          _m("1,234", "1234") == (True, "num-eq"))
+    check("⑥ 受控枚举加限定词：期望「本科」、回显「全日制本科」判等",
+          _m("全日制本科", "本科", "select", ["本科", "硕士"]) == (True, "enum-eq"))
+
+    # 反证 —— 以下**必须判否**，否则就是把"填错了"放过去
+    check("⑦ 反证：181 vs 1810 不得判等（数字归一化不能吞掉量级）",
+          _m("1810", "181")[0] is False)
+    check("⑧ 反证：不同日期不得判等",
+          _m("2026-09-23", "2026-09-22", "date")[0] is False)
+    check("⑨ 反证：`2026-07` 不得与 `2026-07-01` 判等（回读不补全，"
+          "补全会把「没填全」放过去）",
+          _m("2026-07", "2026-07-01", "date")[0] is False)
+    check("⑩ 反证：`2019-2023` 区间不得被读成「2019 年 2 月 3 日」类的日期",
+          _norm_date_loose("2019-2023") is None)
+    check("⑪ 反证：月份 13 不得判为合法日期",
+          _norm_date_loose("2026-13-01") is None)
+    check("⑫ 反证：**自由文本不比对** —— 无 option 域时「全日制本科」vs「本科」"
+          "必须判否（否则站点随便加个后缀就骗过判据）",
+          _m("全日制本科", "本科")[0] is False)
+    check("⑬ 反证：enum-eq 是单向的 —— 期望长、回显短不得命中",
+          _m("本科", "全日制本科", "select", ["全日制本科"])[0] is False)
+    check("⑭ 反证：空值不冒充命中（没有 got 就没有比对）",
+          _m("", "本科")[0] is False and _m("本科", "")[0] is False)
 
     print("\n自测结果：%d 通过 / %d 失败" % (ok[0], bad[0]))
     return 0 if bad[0] == 0 else 1
