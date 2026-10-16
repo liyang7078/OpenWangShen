@@ -163,6 +163,61 @@ def render_attach(attach_rows, ctx):
     return "\n".join(L)
 
 
+def _load_records(path):
+    """读记录组拆分产物（`split_records.py` 生成）。读不到返回 None —— **清单照出**，
+    不为一个可选的附录让整张清单失败。"""
+    if not path:
+        return None
+    import json
+    try:
+        with io.open(path, encoding="utf-8") as fh:
+            return json.loads(fh.read())
+    except Exception:                                        # noqa: BLE001
+        return None
+
+
+def render_records(doc):
+    """把记录组拆分结果渲染成清单的一节。**只渲染键名与段数，不渲染文本值。**
+
+    为什么值得单独一节：经历类内容在页面上是**可多条的表格**（一组一行），不是单值框。
+    清单如果只列「实习经历 = 一整段文字」，你在页面上根本不知道该往哪一行放。
+    这一节把「切成几段、每段起止是什么」摊开，剩下的正文分配仍由你决定 ——
+    **本工具不做「这段文字里哪句是企业名」这种语义推断**，猜错就是替你造假。
+    """
+    mods = (doc or {}).get("模块") or []
+    if not mods:
+        return ""
+    L = []
+    L.append("## 附：记录组 —— 多段该怎么填")
+    L.append("")
+    L.append("> 下列内容在页面上是**「表格 + 添加一行」**的多条结构，一组一行；")
+    L.append("> 这里按**日期区间**把它切成了多段，**每段对应一行**。")
+    L.append("> 起止时间以原文为准（**未擅自补日**）；每行内各个字段的正文由你自己分配。")
+    L.append("")
+    L.append("| 档案键 | 页面上的候选模块 | 段数 | 各段起止 |")
+    L.append("|---|---|---|---|")
+    for m in mods:
+        spans = []
+        for seg in m.get("记录") or []:
+            if seg.get("_扁平时间"):
+                spans.append("（扁平键直接取值）")
+            elif seg.get("起"):
+                spans.append("%s~%s" % (seg["起"], seg["止"] or "?"))
+            else:
+                spans.append("（无起止，需自己补）")
+        cands = "、".join(m.get("候选模块名") or []) or "（通用表未覆盖，请照页面实际模块名填）"
+        L.append("| `%s` | %s | %d | %s |"
+                 % (m["档案键"], cands, m.get("段数") or 0, "；".join(spans)))
+    L.append("")
+    st = (doc or {}).get("统计") or {}
+    if st.get("无区间键"):
+        L.append("- 有日期但不成对（起止只够填一半）：%s" % "、".join(st["无区间键"]))
+    if st.get("无日期键"):
+        L.append("- 完全没有日期信息（起止需自己补）：%s" % "、".join(st["无日期键"]))
+    L.append("")
+    return "\n".join(L)
+
+
 def collect_attachments(labels, fields, profile, index):
     """收集附件类字段（仅当给了页面标签时）。"""
     if not labels:
@@ -176,11 +231,15 @@ def collect_attachments(labels, fields, profile, index):
     return out
 
 
-def build(labels, fields, profile, ctx):
+def build(labels, fields, profile, ctx, records_doc=None):
     """算出清单正文（不打印、不落盘）。
 
     把「算」与「打印/写盘」分开，自测才能断言**算出来的东西**，
     而不必去抓屏匹配文案。返回 (content, rows, ready, miss, attach, unmatched)。
+
+    `records_doc` = 记录组拆分产物（`split_records.py` 生成）。给了就多出一节，
+    说明**经历类内容在页面上是多条表格、该分成几段**；不给则清单与从前**一模一样**
+    （不传参数行为不变，是这条升级的底线）。
     """
     index = core.build_index(fields)
     rows, unmatched, _ = build_rows(labels, fields, profile, index)
@@ -193,7 +252,8 @@ def build(labels, fields, profile, ctx):
     if unmatched:
         tail = ("\n## 五、规则库未命中（需你手动填写）\n\n"
                 + "\n".join("- %s" % u for u in unmatched) + "\n")
-    return head + "\n" + body + tail, rows, ready, miss, attach, unmatched
+    return head + "\n" + body + render_records(records_doc) + tail, \
+        rows, ready, miss, attach, unmatched
 
 
 def selftest():
@@ -295,6 +355,31 @@ def selftest():
     check("⑰ 显式 --overwrite 才覆盖",
           rc3 == 0 and "旧内容" not in overwritten and "网申填写清单" in overwritten)
 
+    # ---- 记录组附录（2026-10-16 新增）----
+    # 底线是「不传就不变」，所以先钉住这一条。
+    check("⑱ 不传记录组数据 → 不渲染该节（清单与从前一致）",
+          render_records(None) == "" and render_records({}) == "")
+    check("⑲ 反证：不传时清单正文里确实没有记录组节",
+          "记录组 —— 多段该怎么填" not in content, content[-160:])
+
+    rd = {"模块": [{"档案键": "实习经历", "候选模块名": ["实习经历"], "段数": 2,
+                    "记录": [{"序": 1, "起": "2023-07", "止": "2023-09"},
+                             {"序": 2, "起": "2024-01", "止": "2024-03"}]},
+                   {"档案键": "论文专利", "候选模块名": [], "段数": 1,
+                    "记录": [{"序": 1, "起": "", "止": ""}]}],
+          "统计": {"无区间键": ["工作经历"], "无日期键": ["获奖情况"]}}
+    txt = render_records(rd)
+    check("⑳ 列出候选模块与段数", "实习经历" in txt and "| 2 |" in txt, txt[:140])
+    check("㉑ 列出各段起止", "2023-07~2023-09" in txt and "2024-01~2024-03" in txt, txt[:200])
+    check("㉒ 无候选模块时如实标注（不硬塞一个假模块名）",
+          "通用表未覆盖" in txt, txt[:240])
+    check("㉓ 两类缺口分开报（不成对 ≠ 没日期）",
+          "有日期但不成对" in txt and "完全没有日期信息" in txt, txt[-160:])
+
+    # 反证：该节**只**渲染结构与统计，不渲染任何正文值
+    check("㉔ **该节只出结构与统计，不出现经历正文**（值不进清单旁注）",
+          "在某公司" not in txt and "实习内容" not in txt)
+
     print("\n自测结果：%d 通过 / %d 失败" % (ok[0], bad[0]))
     return 0 if bad[0] == 0 else 1
 
@@ -309,6 +394,8 @@ def main(argv=None):
     ap.add_argument("--job", default="", help="岗位名")
     ap.add_argument("--url", default="", help="投递链接")
     ap.add_argument("--resume", default="", help="本次使用的简历文件名")
+    ap.add_argument("--records", default="",
+                    help="记录组拆分产物（split_records.py 生成），附进清单；不给则不变")
     ap.add_argument("--out", help="输出路径（.md）")
     ap.add_argument("--dry-run", action="store_true", help="只统计，不落盘")
     ap.add_argument("--overwrite", action="store_true",
@@ -337,7 +424,13 @@ def main(argv=None):
         "company": args.company, "job": args.job,
         "url": args.url, "resume": args.resume,
     }
-    content, rows, ready, miss, attach, unmatched = build(labels, fields, profile, ctx)
+    records_doc = _load_records(getattr(args, "records", ""))
+    content, rows, ready, miss, attach, unmatched = build(
+        labels, fields, profile, ctx, records_doc=records_doc)
+    if records_doc:
+        print("  记录组：已附上拆分指引（%d 个键）" % len(records_doc.get("模块") or []))
+    elif getattr(args, "records", ""):
+        print("  [WARN] 记录组产物读不了，已跳过该节（清单其余部分不受影响）")
 
     print("清单生成完成")
     print("  页面字段：%s" % (len(labels) if labels else "（未提供，按规则库全量列举）"))

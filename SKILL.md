@@ -112,14 +112,32 @@ python scripts/wangshen.py sheet --profile profile.json \
 
 ## 七、脚本速查
 
-| 脚本 | 职责 | 退出码 |
-|---|---|---|
-| `scripts/core.py` | 核心库（规则/索引/映射） | 0 |
-| `scripts/check_profile.py` | 档案体检 | 0 正常；2 必填缺失（`--strict`） |
-| `scripts/fill_form.py` | 自动填表 | 0 完成；4 缺 playwright |
-| `scripts/make_sheet.py` | 填写清单 | 0 |
-| `scripts/mask_pii.py` | PII 脱敏 | 0；1 二验未过 |
-| `scripts/wangshen.py` | 统一入口 | 透传 |
+<!-- BEGIN: 脚本速查（由 scripts/gen_script_index.py 生成，勿手改） -->
+| 脚本 | 职责 |
+|---|---|
+| `scripts/wangshen.py` | 统一入口（下面每个脚本都能通过它调用） |
+| `scripts/apply_run.py` | 一条命令跑完全程：起浏览器 → 探通 → 接管 → 填表 |
+| `scripts/check_profile.py` | 档案体检：看你的档案缺什么 |
+| `scripts/doc_check.py` | 文档数字一致性门：文档里的数字 vs 资产现算值（--fix 可改写） |
+| `scripts/fill_form.py` | 自动填表：打开岗位页→识别字段→写入（不提交） |
+| `scripts/gen_issue_template.py` | 由脚本选项集生成 Issue 模板（--check 防漂移） |
+| `scripts/gen_script_index.py` | 由 CMDS 现算本文件里的脚本速查表（--check 防漂移） |
+| `scripts/import_resume.py` | 简历导入：在本机把简历抽成预填档案（不联网） |
+| `scripts/inbox.py` | 回流收件台（作者侧）：汇总别人提的反馈，逐条决定收不收 |
+| `scripts/issue_registry.py` | 问题库：登记踩过的坑 / 查解法 / 按指纹匹配策略 |
+| `scripts/issue_trial.py` | 问题试验：多路径试跑 → 断言择优 → 固化进策略库 |
+| `scripts/make_checklist.py` | 空白问卷：投网申之前要先备好哪些信息（第一步） |
+| `scripts/make_sheet.py` | 生成填写清单（保底模式，零浏览器依赖） |
+| `scripts/mask_pii.py` | PII 脱敏：需要 AI 帮忙写开放题时先脱敏 |
+| `scripts/probe_page.py` | 只读探针：看清这一页有哪些控件、哪些填不上、为什么（不点不填不删） |
+| `scripts/report_feedback.py` | 反馈包（考生侧）：把填不上的框整理成可提交的 Issue |
+| `scripts/sheet_html.py` | 可复制清单页：点一下就复制的本机网页 |
+| `scripts/split_records.py` | 记录组拆分：把经历类自由文本按日期切成可填的多段（只读档案） |
+| `scripts/start_browser.py` | 开一个可被接管的浏览器（复用登录态，真实站必备） |
+<!-- END: 脚本速查 -->
+
+**退出码速记**：`0` 正常 ｜ `2` 参数错（**在起浏览器之前**就报）｜ `3` 起不来 ｜
+`4` 缺 playwright（会自动提示保底路径）。
 
 自测：`python scripts/wangshen.py selftest`
 

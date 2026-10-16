@@ -11,6 +11,9 @@ wangshen.py · OpenWangShen 统一入口
     python scripts/wangshen.py sheet   --profile profile.json ...  生成填写清单
     python scripts/wangshen.py sheethtml --in 填写清单.md          可复制清单页（点一下就复制）
     python scripts/wangshen.py fill    --profile profile.json ...  自动填表（不提交）
+    python scripts/wangshen.py run     --url U --profile p.json    一条命令跑完全程（推荐）
+    python scripts/wangshen.py records --profile profile.json      记录组拆分（经历类多段）
+    python scripts/wangshen.py probe   --connect 9222              只读探针：看清这页有哪些控件
     python scripts/wangshen.py mask    --profile profile.json ...  PII 脱敏
     python scripts/wangshen.py issue   --list                      问题库：登记 / 查询 / 策略匹配
     python scripts/wangshen.py trial   --issue <id> --path ...     试跑多路径 → 择优 → 固化
@@ -53,6 +56,10 @@ CMDS = {
     "sheet": ("make_sheet.py", "生成填写清单（保底模式，零浏览器依赖）"),
     "sheethtml": ("sheet_html.py", "可复制清单页：点一下就复制的本机网页"),
     "fill": ("fill_form.py", "自动填表：打开岗位页→识别字段→写入（不提交）"),
+    "run": ("apply_run.py", "一条命令跑完全程：起浏览器 → 探通 → 接管 → 填表"),
+    "records": ("split_records.py", "记录组拆分：把经历类自由文本按日期切成可填的多段（只读档案）"),
+    "probe": ("probe_page.py", "只读探针：看清这一页有哪些控件、哪些填不上、为什么（不点不填不删）"),
+    "index": ("gen_script_index.py", "由 CMDS 现算本文件里的脚本速查表（--check 防漂移）"),
     "browser": ("start_browser.py", "开一个可被接管的浏览器（复用登录态，真实站必备）"),
     "mask": ("mask_pii.py", "PII 脱敏：需要 AI 帮忙写开放题时先脱敏"),
     "issue": ("issue_registry.py", "问题库：登记踩过的坑 / 查解法 / 按指纹匹配策略"),
@@ -166,6 +173,9 @@ def selftest():
         ("core.py", ["core.py", "--selftest"]),
         ("check_profile.py", ["check_profile.py", "--selftest"]),
         ("fill_form.py", ["fill_form.py", "--selftest"]),
+        ("apply_run.py", ["apply_run.py", "--selftest"]),
+        ("split_records.py", ["split_records.py", "--selftest"]),
+        ("probe_page.py", ["probe_page.py", "--selftest"]),
         ("start_browser.py", ["start_browser.py", "--selftest"]),
         ("make_sheet.py", ["make_sheet.py", "--selftest"]),
         ("mask_pii.py", ["mask_pii.py", "--selftest"]),
@@ -181,6 +191,8 @@ def selftest():
         ("doc_check.py", ["doc_check.py", "--selftest"]),
         # 执行点（不是文档承诺）：Issue 模板若与脚本选项集漂移，这里直接红。
         ("Issue 模板一致性", ["gen_issue_template.py", "--check"]),
+        # 执行点（不是文档承诺）：脚本速查表若与 CMDS 漂移，这里直接红。
+        ("脚本速查表一致性", ["gen_script_index.py", "--check"]),
         # 执行点（不是文档承诺）：文档里的数字若与资产分叉，这里直接红。
         ("文档数字一致性", ["doc_check.py"]),
     ]:
