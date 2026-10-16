@@ -12,7 +12,7 @@ dist_check.py · 分发前「真实值」扫描器
 它挡不住「把真值粘贴进示例文件」「把真值写进文档」这类事故。
 本脚本就是补这一刀。
 
-五条判据
+六条判据
 --------
 1. **路径规则**：入库路径命中「本就该被忽略」的模式（profile.json 等）
 2. **值等同**  ：入库文本中出现与 `--profile` 某一字段**完全相等**的值
@@ -21,6 +21,20 @@ dist_check.py · 分发前「真实值」扫描器
 5. **语法下限**：README 承诺 Python 3.8+，入库 `.py` 里就不能出现 3.9+ 才成立的写法
    （这不是隐私判据，但同属「分发前必须站得住的承诺」—— 承诺塌了，
    用户在 3.8 上 `git clone` 下来第一行就跑不动）
+6. **示例档案**：`fixtures/*.json` 的每个键都必须是字段规则库里的**「键」**，
+   否则考生照抄示例档案后 `core.value_of()` 取不到值（「看着填了，实际取不到」）
+   （见下方「判据 6 的由来」）
+
+判据 6 的由来（2026-10-16）
+---------------------------
+`fixtures/档案_示例.json` 是考生抄成自己 `profile.json` 的模板。
+它的键必须 ∈ 词表各字段的**「键」**集合 —— 注意**不是「标签」**：
+标签是页面上的叫法（含旧键别名，如「户籍所在地」），而 `value_of` 按「键」取值。
+
+v0.4.0 修过 6 个这样的键（`户籍所在地`→`户籍` 等），但**当时没有任何判据盯着**，
+只能靠人工核对，还因此在 `_变更记录.md` 里留下一处「已修 vs 仍未修」的矛盾记载。
+⇒ 判据 6 把这一次性人工核对变成**分发前常驻检查**。
+（判据强度 = 执行点数量，不是份数；文档里写「记得核对」不算执行点。）
 
 判据 5 的边界（2026-10-16 新增，**别把它想得比实际强**）
 --------------------------------------------------------
@@ -415,6 +429,57 @@ def documented_fake_values():
     return vals
 
 
+# ── 判据 6：示例档案的键必须是词表键（2026-10-16 新增）────────────
+FIXTURE_JSON_RE = re.compile(r"^fixtures/[^/]+\.json$")
+
+
+def rule_keys():
+    """词表里所有「键」的集合 —— 与 core.value_of 的取值口径一致。"""
+    try:
+        return {it["键"] for it in core.load_rules() if it.get("键")}
+    except (OSError, ValueError, KeyError, TypeError):
+        return set()
+
+
+def bad_fixture_keys(data, keys):
+    """
+    纯函数：返回 data 里**不在** keys 里的非 `_` 键。便于自测。
+    （`_` 开头是元数据键，如 _说明 / _用法，本就不进词表，不算问题。）
+    """
+    return [k for k in data
+            if not str(k).startswith("_") and k not in keys]
+
+
+def fixture_key_problems():
+    """
+    fixtures/*.json 的非词表键清单 → [(相对路径, 键, 说明)]。
+
+    读不到词表 ⇒ 报一条并交 fail-closed（判定不了就不放行）。
+    读不到 / 非法 JSON 的 fixture 由「覆盖面」口径另行处理，不在这里重复报。
+    """
+    keys = rule_keys()
+    if not keys:
+        return [("fixtures/", "（词表）",
+                 "字段规则库未能加载，无法判定示例档案的键是否可用")]
+    problems = []
+    for rel in tracked_files():
+        if not FIXTURE_JSON_RE.match(rel):
+            continue
+        full = os.path.join(core.PROJECT_ROOT, rel)
+        try:
+            with open(full, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        for k in bad_fixture_keys(data, keys):
+            problems.append((rel, str(k),
+                             "该键不在字段规则库里 ⇒ value_of 取不到值"
+                             "（看着填了，实际取不到）"))
+    return problems
+
+
 def check(profile=None, verbose=True):
     """
     跑全部判据。返回 (fails, warns)，均为 [(判据, 文件, 行号, 说明)]。
@@ -490,6 +555,10 @@ def check(profile=None, verbose=True):
         for ln, why in py_min_problems(rel):
             fails.append(("语法下限", rel, ln, why))
 
+    # 判据 6（2026-10-16 新增）：示例档案的键必须是词表键
+    for rel, k, why in fixture_key_problems():
+        fails.append(("示例档案", rel, 0, "键「%s」%s" % (k, why)))
+
     # 覆盖面缺口 ⇒ 不得判定「可以分发」（fail-closed）
     if unreadable:
         fails.append(("覆盖不全", "（%d 个文件）" % len(unreadable), 0,
@@ -500,6 +569,8 @@ def check(profile=None, verbose=True):
               % (len(files), len(files) - len(skipped_bin) - len(unreadable),
                  len(skipped_bin), len(unreadable)))
         print("官方假值白名单：%d 个（取自 fixtures/档案_示例.json）" % len(fake))
+        print("词表键：%d 个 ｜ 判据 6 校验 fixtures/*.json 的键是否全部取得到值"
+              % len(rule_keys()))
         if public:
             print("公开用途地址：%d 个（取自 assets/反馈渠道.json 的「反馈邮箱」）"
                   % len(public))
@@ -640,9 +711,27 @@ def selftest():
     print("【自测 10】Python 3.8 下限：%d 个 .py 全过；"
           "注解联合／泛型下标／新 API／match 均能抓到 ✓" % len(pyfiles))
 
+    # 判据 6（2026-10-16 新增）：示例档案的键必须都在词表里。
+    # 正例：本仓 fixture 必须全过 —— 过不了就说明「示例档案可照抄」是句空话。
+    rk = rule_keys()
+    assert rk, "词表键集合读不到，判据 6 形同虚设"
+    fx = fixture_key_problems()
+    assert not fx, "本仓 fixture 有非词表键：%s" % fx[:3]
+
+    # 反例：造一个带非词表键的档案，判据必须抓到。
+    # ⚠️ 关键是「标签 ≠ 键」这层：旧别名 `户籍所在地` **在词表里**（是「户籍」的标签），
+    #    但**不是键** —— 拿它当档案键照样 value_of 取不到值，
+    #    所以判据必须把它判红，不能因为「词表里有这个词」就放行。
+    assert "户籍" in rk, "词表里找不到 `户籍` 键"
+    assert "户籍所在地" not in rk, "`户籍所在地` 不该是键（它是「户籍」的标签/别名）"
+    assert bad_fixture_keys({"户籍": "x", "户籍所在地": "y"}, rk) == ["户籍所在地"], \
+        "非词表键（旧别名）漏检"
+    assert bad_fixture_keys({"户籍": "x", "_说明": "z"}, rk) == [], "`_` 元数据键被误报"
+    print("【自测 11】判据 6 示例档案键：标签≠键 的区分有效 ✓")
+
     import shutil
     shutil.rmtree(tmp, ignore_errors=True)
-    print("【自测通过】五条判据全部生效")
+    print("【自测通过】六条判据全部生效")
     return 0
 
 
