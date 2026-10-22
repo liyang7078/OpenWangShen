@@ -134,6 +134,7 @@ python scripts/wangshen.py sheet --profile profile.json \
 | `scripts/sheet_html.py` | 可复制清单页：点一下就复制的本机网页 |
 | `scripts/split_records.py` | 记录组拆分：把经历类自由文本按日期切成可填的多段（只读档案） |
 | `scripts/start_browser.py` | 开一个可被接管的浏览器（复用登录态，真实站必备） |
+| `scripts/sync_fields.py` | 词表漂移门：比对两份字段规则字典（只读，--check 用于验收） |
 <!-- END: 脚本速查 -->
 
 **退出码速记**：`0` 正常 ｜ `2` 参数错（**在起浏览器之前**就报）｜ `3` 起不来 ｜

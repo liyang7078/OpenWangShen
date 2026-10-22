@@ -68,6 +68,7 @@ CMDS = {
     "inbox": ("inbox.py", "回流收件台（作者侧）：汇总别人提的反馈，逐条决定收不收"),
     "template": ("gen_issue_template.py", "由脚本选项集生成 Issue 模板（--check 防漂移）"),
     "docs": ("doc_check.py", "文档数字一致性门：文档里的数字 vs 资产现算值（--fix 可改写）"),
+    "syncfields": ("sync_fields.py", "词表漂移门：比对两份字段规则字典（只读，--check 用于验收）"),
 }
 
 
