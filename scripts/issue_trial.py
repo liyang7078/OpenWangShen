@@ -564,10 +564,10 @@ def main(argv=None):
     ap = argparse.ArgumentParser(
         description="问题试验器：多路径试跑 → 断言择优 → 固化进策略库（零真值）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="示例：\n"
+        epilog="示例（示例里的 probe.py 是占位名，仓内不提供该文件，请替换成你自己的探测脚本）：\n"
                "  python scripts/issue_trial.py --issue Q-20260922-013 \\\n"
-               "      --path \"几何邻居法=python scripts/probe.py --mode geometric\" \\\n"
-               "      --path \"向上找祖先=python scripts/probe.py --mode ancestor\" \\\n"
+               "      --path \"几何邻居法=python 你的探测脚本.py --mode geometric\" \\\n"
+               "      --path \"向上找祖先=python 你的探测脚本.py --mode ancestor\" \\\n"
                "      --assert \"标签命中数 > 0\" --assert \"值当标签数 == 0\" \\\n"
                "      --by 标签命中数 --snapshot page.json\n\n"
                "  加 --promote --动作 \"...\" --指纹 file-hidden 即固化（会跑全量回归）\n")

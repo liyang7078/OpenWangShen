@@ -162,9 +162,11 @@ python scripts/dist_check.py
 python scripts/wangshen.py issue --add '{"现象":"...","站点":["*"],"指纹":["..."]}'
 
 # ② 试：每条路径是一条命令，最后一行须打印 {"指标":{...},"成功":true,"证据":"..."}
+#    注意：示例里的 probe.py 是**占位名，仓内不提供这个文件**（仓内探测工具是
+#    scripts/probe_page.py，它不接受 --mode）。--path 的值请填你自己写的探测命令。
 python scripts/wangshen.py trial --issue Q-... \
-    --path "几何邻居法=python scripts/probe.py --mode geometric" \
-    --path "向上找祖先=python scripts/probe.py --mode ancestor" \
+    --path "几何邻居法=python 你的探测脚本.py --mode geometric" \
+    --path "向上找祖先=python 你的探测脚本.py --mode ancestor" \
     --assert "标签命中数 > 0" --assert "把值当标签的条数 == 0" \
     --by 标签命中数
 
